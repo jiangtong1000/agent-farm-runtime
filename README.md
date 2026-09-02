@@ -33,6 +33,16 @@ Actuation (new — the control loop that drives disposable workers):
 - `Reconciler.reconcile_once` — one serialized, idempotent pass (INV-6) that
   actuates `READY` tasks, applies fenced worker receipts, adopts crashed
   workers, resumes unblocked `WAITING` tasks, and repairs the observed registry;
+- **crash-consistency**: desired authoritative state (RUNNING + lease) is
+  persisted BEFORE any external launch, so a reconciler crash between the two
+  never double-actuates; launch is idempotent per lease;
+- **grace policy**: a lease is rotated off a worker only when it is *durably*
+  dead (no receipt and no heartbeat within `grace_seconds`) — a single transient
+  liveness miss never revokes a live worker's lease (INV-5);
+- **single-reconciler lock** (`locking.single_reconciler`, flock): two
+  `farm reconcile` processes cannot race on one farm (INV-6);
+- every authoritative mutation — state transition AND lease acquire/rotate/
+  release — goes through one durable-write + event boundary (INV-7);
 - structured **receipt** primitive (`RUNNING`/`AWAITING`/`SUBMITTED`/`FAILED`),
   fenced by `lease_id` so a superseded worker generation cannot advance a task;
 - **lease rotation** (`rotate_lease`) — releases a lease from a *proven-dead*

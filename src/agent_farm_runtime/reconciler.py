@@ -20,7 +20,6 @@ from .models import (
 from .store import FarmPaths, TaskStore, WorkerRegistry
 from .transitions import acquire_lease, rotate_lease, transition_task
 
-# States from which a worker's structured receipt drives the next state.
 _RECEIPT_TARGET = {
     ReceiptStatus.AWAITING: TaskState.WAITING,
     ReceiptStatus.SUBMITTED: TaskState.SUBMITTED,
@@ -28,32 +27,48 @@ _RECEIPT_TARGET = {
 }
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _default_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
 
 
 @dataclass
 class ReconcileReport:
-    launched: list[str] = field(default_factory=list)       # task ids newly actuated
-    adopted: list[str] = field(default_factory=list)        # task ids re-actuated after crash
-    advanced: list[tuple[str, str]] = field(default_factory=list)  # (task, new state)
-    resumed: list[str] = field(default_factory=list)        # WAITING->RUNNING
-    heartbeats: list[str] = field(default_factory=list)     # worker ids seen alive
-    ignored_stale: list[str] = field(default_factory=list)  # fenced-out receipts (worker ids)
+    launched: list[str] = field(default_factory=list)
+    adopted: list[str] = field(default_factory=list)
+    advanced: list[tuple[str, str]] = field(default_factory=list)
+    resumed: list[str] = field(default_factory=list)
+    heartbeats: list[str] = field(default_factory=list)
+    ignored_stale: list[str] = field(default_factory=list)
+    waiting_grace: list[str] = field(default_factory=list)  # dead-looking but within grace
 
 
 class Reconciler:
     """Serialized, idempotent control loop (INV-6).
 
-    One `reconcile_once` call is a single pass over authoritative task state; it
-    is the only thing that actuates workers. It:
-      1. actuates READY tasks (mint lease, launch worker, READY->RUNNING);
-      2. applies fenced receipts from live workers (RUNNING->WAITING/SUBMITTED/FAILED);
-      3. adopts crashed RUNNING tasks (rotate lease off the dead worker, relaunch);
-      4. resumes WAITING tasks whose unblock predicate fires;
-      5. repairs the observed Worker Registry to match Task.lease + liveness.
-    All state mutation goes through transitions/lease helpers; the registry is
-    observed-only and never authoritative.
+    Crash-consistency contract (per review):
+      * Desired authoritative state (RUNNING + lease) is PERSISTED BEFORE any
+        external actuation. If the reconciler dies between persist and launch,
+        the next pass sees a RUNNING task whose worker is absent and re-actuates
+        it after the grace window -- it never double-launches, because launch is
+        never re-issued for a lease that is only *transiently* unobserved.
+      * A lease is rotated off a worker ONLY when that worker is DURABLY dead:
+        not observed alive AND no valid receipt AND no heartbeat within
+        `grace_seconds`. A single transient liveness miss never revokes a live
+        worker's lease (INV-5).
+      * Every authoritative mutation -- state transition AND lease acquire/
+        rotate/release -- goes through the one `_commit` boundary (INV-7): a
+        durable Task Store write paired with an event.
+    Concurrency is the caller's responsibility (see locking.single_reconciler);
+    two reconcilers must not run on one farm.
     """
 
     def __init__(
@@ -62,157 +77,154 @@ class Reconciler:
         executor: WorkerExecutor,
         *,
         actor: str = "reconciler",
-        clock: Callable[[], str] = _now,
+        clock: Callable[[], datetime] = _default_clock,
         unblock: Callable[[Task], bool] | None = None,
+        grace_seconds: float = 60.0,
     ):
         self.paths = paths
         self.executor = executor
         self.actor = actor
         self.clock = clock
         self.unblock = unblock
+        self.grace_seconds = grace_seconds
         self.tasks = TaskStore(paths)
         self.registry = WorkerRegistry(paths)
         self.events = EventLog(paths.events / "log.ndjson")
 
-    # -- helpers ---------------------------------------------------------------
+    # -- boundaries ------------------------------------------------------------
+
+    def _iso(self) -> str:
+        return self.clock().isoformat()
 
     def _emit(self, task_id: str, type_: str, payload: dict) -> None:
-        self.events.append(
-            Event(
-                id=uuid.uuid4().hex,
-                task_id=task_id,
-                type=type_,
-                actor=self.actor,
-                payload=payload,
-                ts=self.clock(),
-            )
-        )
+        self.events.append(Event(
+            id=uuid.uuid4().hex, task_id=task_id, type=type_,
+            actor=self.actor, payload=payload, ts=self._iso(),
+        ))
 
-    def _mint_lease(self, worker_id: str) -> Lease:
-        return Lease(worker_id=worker_id, lease_id=uuid.uuid4().hex)
+    def _commit(self, new_task: Task, event_type: str, payload: dict) -> None:
+        """The single authoritative-mutation boundary: durable write + event.
+        Every state transition and every lease change is applied through here."""
+        self.tasks.put_authoritative(new_task)
+        self._emit(new_task.id, event_type, payload)
 
-    def _observe_worker(self, worker_id: str, handle: str | None, task_id: str, lease_id: str, alive: bool) -> None:
-        self.registry.put_observed(
-            Worker(
-                id=worker_id,
-                session_handle=handle,
-                heartbeat=self.clock(),
-                lease={"task_id": task_id, "lease_id": lease_id},
-                state=WorkerState.BUSY if alive else WorkerState.DEAD,
-            )
-        )
+    def _mint(self, task_id: str) -> tuple[str, Lease]:
+        worker_id = f"W-{task_id}-{uuid.uuid4().hex[:6]}"
+        return worker_id, Lease(worker_id=worker_id, lease_id=uuid.uuid4().hex)
 
-    # -- individual task handlers ---------------------------------------------
+    def _observe(self, worker_id: str, handle: str | None, task_id: str,
+                 lease_id: str, *, alive: bool) -> None:
+        self.registry.put_observed(Worker(
+            id=worker_id, session_handle=handle, heartbeat=self._iso(),
+            lease={"task_id": task_id, "lease_id": lease_id},
+            state=WorkerState.BUSY if alive else WorkerState.DEAD,
+        ))
 
-    def _actuate_ready(self, task: Task, report: ReconcileReport) -> None:
-        worker_id = f"W-{task.id}-{uuid.uuid4().hex[:6]}"
-        lease = self._mint_lease(worker_id)
-        leased = acquire_lease(task, lease)
-        handle = self.executor.launch(leased, lease)
-        started = transition_task(
-            leased, TaskState.RUNNING, lease_id=lease.lease_id, new_lease=lease
-        )
-        self.tasks.put_authoritative(started)
-        self._observe_worker(worker_id, handle.session_handle, task.id, lease.lease_id, alive=True)
-        self._emit(task.id, "WORKER_LAUNCHED", {"worker_id": worker_id, "lease_id": lease.lease_id})
-        report.launched.append(task.id)
+    # -- actuation (persist BEFORE launch) ------------------------------------
 
-    def _apply_receipt(self, task: Task, receipt: Receipt, report: ReconcileReport) -> bool:
-        """Apply a fenced receipt to a RUNNING task. Returns True if state changed."""
+    def _start(self, task: Task, report: ReconcileReport, *, adopting_from: str | None = None) -> None:
+        """Compose lease acquisition + RUNNING into ONE persisted mutation, then
+        actuate. Used for first start (READY->RUNNING) and adoption (rotate off a
+        dead worker + re-acquire), so no RUNNING-without-lease state is ever
+        persisted, even across a crash mid-adoption."""
+        base = task
+        if adopting_from is not None:
+            base = rotate_lease(task, dead_worker_id=adopting_from,
+                                reason=f"no heartbeat within {self.grace_seconds}s")
+        worker_id, lease = self._mint(task.id)
+        leased = acquire_lease(base, lease, metadata_patch={"launched_ts": self._iso()})
+        if base.state is TaskState.READY:
+            leased = transition_task(leased, TaskState.RUNNING,
+                                     lease_id=lease.lease_id, new_lease=lease)
+            event, key = "WORKER_LAUNCHED", "launched"
+        else:  # already RUNNING (adoption / leaseless repair)
+            event, key = ("WORKER_ADOPTED", "adopted") if adopting_from else ("WORKER_RELAUNCHED", "launched")
+        payload = {"worker_id": worker_id, "lease_id": lease.lease_id}
+        if adopting_from:
+            payload["dead_worker_id"] = adopting_from
+        if adopting_from:
+            self.executor.stop(adopting_from)
+        self._commit(leased, event, payload)        # PERSIST desired state FIRST
+        handle = self.executor.launch(leased, lease)  # THEN actuate (idempotent per lease)
+        self._observe(worker_id, handle.session_handle, task.id, lease.lease_id, alive=True)
+        getattr(report, key).append(task.id)
+
+    def _apply_receipt(self, task: Task, receipt: Receipt, report: ReconcileReport) -> None:
         if receipt.status is ReceiptStatus.RUNNING:
-            self._observe_worker(
-                receipt.worker_id, None, task.id, task.lease.lease_id, alive=True
-            )
+            self._observe(receipt.worker_id, None, task.id, task.lease.lease_id, alive=True)
             report.heartbeats.append(receipt.worker_id)
-            return False
-
+            return
         target = _RECEIPT_TARGET[receipt.status]
         patch: dict = {"last_receipt_note": receipt.note}
         if target is TaskState.WAITING:
             patch["waiting_on"] = receipt.waiting_on or "unspecified"
-        # SUBMITTED/FAILED/WAITING: keep the lease on WAITING (same worker may
-        # resume); release it on SUBMITTED/FAILED so no worker lingers as owner.
         new_lease: object = task.lease if target is TaskState.WAITING else None
-        advanced = transition_task(
-            task,
-            target,
-            lease_id=task.lease.lease_id,
-            metadata_patch=patch,
-            new_lease=new_lease,
-        )
-        self.tasks.put_authoritative(advanced)
+        advanced = transition_task(task, target, lease_id=task.lease.lease_id,
+                                   metadata_patch=patch, new_lease=new_lease)
+        self._commit(advanced, "RECEIPT_APPLIED",
+                     {"worker_id": receipt.worker_id, "status": receipt.status.value,
+                      "to": target.value})
+        # the codex worker ends its run at a wait/submit boundary: mark not-alive
         if target is not TaskState.WAITING:
             self.executor.stop(receipt.worker_id)
-            self._observe_worker(
-                receipt.worker_id, None, task.id, task.lease.lease_id, alive=False
-            )
-        else:
-            self._observe_worker(
-                receipt.worker_id, None, task.id, task.lease.lease_id, alive=True
-            )
-        self._emit(
-            task.id,
-            "RECEIPT_APPLIED",
-            {"worker_id": receipt.worker_id, "status": receipt.status.value, "to": target.value},
-        )
+        self._observe(receipt.worker_id, None, task.id, task.lease.lease_id, alive=False)
         report.advanced.append((task.id, target.value))
-        return True
 
-    def _adopt_crashed(self, task: Task, report: ReconcileReport) -> None:
-        dead = task.lease.worker_id
-        self.executor.stop(dead)  # best-effort fence of the dead generation
-        released = rotate_lease(task, dead_worker_id=dead)
-        self.tasks.put_authoritative(released)
-        self._emit(task.id, "LEASE_ROTATED", {"dead_worker_id": dead})
-        # re-actuate onto a fresh worker; state is preserved (still RUNNING)
-        worker_id = f"W-{task.id}-{uuid.uuid4().hex[:6]}"
-        lease = self._mint_lease(worker_id)
-        released = self.tasks.get(task.id)
-        leased = acquire_lease(released, lease)
-        handle = self.executor.launch(leased, lease)
-        self.tasks.put_authoritative(leased)
-        self._observe_worker(worker_id, handle.session_handle, task.id, lease.lease_id, alive=True)
-        self._emit(task.id, "WORKER_ADOPTED", {"worker_id": worker_id, "lease_id": lease.lease_id})
-        report.adopted.append(task.id)
-
-    def _resume_waiting(self, task: Task, report: ReconcileReport) -> None:
+    def _resume(self, task: Task, report: ReconcileReport) -> None:
         lease = task.lease
-        resumed = transition_task(task, TaskState.RUNNING, lease_id=lease.lease_id, new_lease=lease)
-        self.executor.resume(resumed, lease.worker_id, lease)
-        self.tasks.put_authoritative(resumed)
-        self._observe_worker(lease.worker_id, None, task.id, lease.lease_id, alive=True)
-        self._emit(task.id, "RESUMED", {"worker_id": lease.worker_id})
+        resumed = transition_task(task, TaskState.RUNNING, lease_id=lease.lease_id,
+                                  new_lease=lease, metadata_patch={"launched_ts": self._iso()})
+        self._commit(resumed, "RESUMED", {"worker_id": lease.worker_id})  # persist first
+        self.executor.resume(resumed, lease.worker_id, lease)             # then actuate
+        self._observe(lease.worker_id, None, task.id, lease.lease_id, alive=True)
         report.resumed.append(task.id)
+
+    # -- death detection (grace) ----------------------------------------------
+
+    def _durably_dead(self, task: Task, workers: dict[str, Worker]) -> bool:
+        """True only if the leased worker has been unobserved past the grace
+        window. Baseline = last heartbeat (observed) or launch time (authoritative
+        floor). A single transient miss returns False."""
+        now = self.clock()
+        w = workers.get(task.lease.worker_id)
+        baseline = _parse(w.heartbeat if w else None) or _parse(task.metadata.get("launched_ts"))
+        if baseline is None:
+            return False  # unknown age -> conservative: do not revoke
+        return (now - baseline).total_seconds() >= self.grace_seconds
 
     # -- main pass -------------------------------------------------------------
 
     def reconcile_once(self) -> ReconcileReport:
         report = ReconcileReport()
+        workers = {w.id: w for w in self.registry.list()}
         for task in self.tasks.list():
             if task.state is TaskState.READY:
-                self._actuate_ready(task, report)
+                self._start(task, report)
                 continue
 
-            if task.state is TaskState.RUNNING and task.lease is not None:
+            if task.state is TaskState.RUNNING:
+                if task.lease is None:
+                    # persisted RUNNING must carry a lease; repair by re-actuating
+                    self._start(task, report)
+                    continue
                 obs = self.executor.poll(task.lease.worker_id)
-                # Fence: only a receipt echoing the authoritative lease counts.
                 if obs.receipt is not None and obs.receipt.lease_id != task.lease.lease_id:
                     report.ignored_stale.append(obs.receipt.worker_id)
                     obs = obs.__class__(worker_id=obs.worker_id, alive=obs.alive, receipt=None)
                 if obs.receipt is not None:
                     self._apply_receipt(task, obs.receipt, report)
-                elif not obs.alive:
-                    self._adopt_crashed(task, report)
-                else:
-                    self._observe_worker(
-                        task.lease.worker_id, None, task.id, task.lease.lease_id, alive=True
-                    )
+                elif obs.alive:
+                    self._observe(task.lease.worker_id, None, task.id, task.lease.lease_id, alive=True)
                     report.heartbeats.append(task.lease.worker_id)
+                elif self._durably_dead(task, workers):
+                    self._start(task, report, adopting_from=task.lease.worker_id)
+                else:
+                    report.waiting_grace.append(task.id)  # transient miss: wait, do not revoke
                 continue
 
             if task.state is TaskState.WAITING and task.lease is not None:
                 if self.unblock is not None and self.unblock(task):
-                    self._resume_waiting(task, report)
+                    self._resume(task, report)
                 continue
 
         return report

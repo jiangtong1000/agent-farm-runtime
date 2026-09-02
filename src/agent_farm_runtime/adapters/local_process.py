@@ -46,8 +46,24 @@ class LocalProcessExecutor:
         except ValueError:
             return None
 
+    def _pid_alive(self, worker_id: str) -> bool:
+        pid = self._read_pid(worker_id)
+        if pid is None:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
     def launch(self, task: Task, lease: Lease) -> LaunchHandle:
         wid = lease.worker_id
+        # idempotent for a given lease: if this worker is already running, do not
+        # start a second process (crash-consistency defense-in-depth).
+        if self._pid_alive(wid):
+            return LaunchHandle(worker_id=wid, session_handle=f"pid:{self._read_pid(wid)}")
         receipt_path = self._receipt_path(wid)
         # fresh generation: do not inherit a stale receipt file
         receipt_path.unlink(missing_ok=True)

@@ -71,6 +71,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
 def cmd_reconcile(args: argparse.Namespace) -> int:
     import time
 
+    from .locking import ReconcilerBusy, single_reconciler
     from .reconciler import Reconciler
 
     paths = FarmPaths(farm_root(Path(args.project)))
@@ -83,7 +84,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     else:
         from .adapters.local_process import LocalProcessExecutor
         executor = LocalProcessExecutor(paths.runtime)
-    reconciler = Reconciler(paths, executor)
+    reconciler = Reconciler(paths, executor, grace_seconds=args.grace_seconds)
 
     def one_pass() -> None:
         rep = reconciler.reconcile_once()
@@ -94,14 +95,21 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             "resumed": rep.resumed,
             "heartbeats": rep.heartbeats,
             "ignored_stale": rep.ignored_stale,
+            "waiting_grace": rep.waiting_grace,
         }, sort_keys=True))
 
-    if not args.loop:
-        one_pass()
-        return 0
-    while True:
-        one_pass()
-        time.sleep(args.interval)
+    # INV-6: at most one reconciler mutates a farm at a time.
+    try:
+        with single_reconciler(paths.runtime):
+            if not args.loop:
+                one_pass()
+                return 0
+            while True:
+                one_pass()
+                time.sleep(args.interval)
+    except ReconcilerBusy as exc:
+        print(f"reconciler busy: {exc}")
+        return 1
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -164,6 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
                    default="local-process", help="worker backend (default: local-process)")
     p.add_argument("--session", default="farm2", help="tmux session for codex-tmux (never the live `farm`)")
     p.add_argument("--tmux-socket", default=None, help="dedicated tmux server socket (-L) for isolation")
+    p.add_argument("--grace-seconds", type=float, default=60.0,
+                   help="seconds a leased worker may be unobserved before its lease is rotated")
     p.add_argument("--loop", action="store_true", help="run continuously instead of one pass")
     p.add_argument("--interval", type=float, default=10.0, help="seconds between passes in --loop")
     p.set_defaults(func=cmd_reconcile)

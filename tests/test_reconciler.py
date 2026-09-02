@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 
@@ -10,6 +12,7 @@ import pytest
 from agent_farm_runtime.adapters.fake import FakeExecutor
 from agent_farm_runtime.adapters.local_process import LocalProcessExecutor
 from agent_farm_runtime.doctor import run_doctor
+from agent_farm_runtime.locking import ReconcilerBusy, single_reconciler
 from agent_farm_runtime.models import Receipt, ReceiptStatus, Task, TaskState
 from agent_farm_runtime.reconciler import Reconciler
 from agent_farm_runtime.store import FarmPaths, TaskStore
@@ -19,6 +22,26 @@ from agent_farm_runtime.transitions import (
     acquire_lease,
     rotate_lease,
 )
+
+
+class _Clock:
+    """Manual clock for deterministic grace-window tests."""
+
+    def __init__(self, start: float = 1_000.0):
+        self.t = start
+
+    def __call__(self) -> datetime:
+        return datetime.fromtimestamp(self.t, tz=timezone.utc)
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _events(paths: FarmPaths) -> list[dict]:
+    log = paths.events / "log.ndjson"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
 
 
 def _paths(tmp_path: Path) -> FarmPaths:
@@ -55,8 +78,11 @@ def test_rotate_lease_refuses_wrong_holder():
     task = acquire_lease(_ready_task(), Lease("W1", "L1"))
     # never rotate a lease off anyone but the current (proven-dead) holder
     with pytest.raises(LeaseError):
-        rotate_lease(task, dead_worker_id="W2")
-    released = rotate_lease(task, dead_worker_id="W1")
+        rotate_lease(task, dead_worker_id="W2", reason="dead")
+    # and a rotation must document how death was established
+    with pytest.raises(LeaseError):
+        rotate_lease(task, dead_worker_id="W1", reason="")
+    released = rotate_lease(task, dead_worker_id="W1", reason="no heartbeat within grace")
     assert released.lease is None
 
 
@@ -143,7 +169,7 @@ def test_adopts_crashed_worker(tmp_path):
     paths = _paths(tmp_path)
     TaskStore(paths).create(_ready_task())
     ex = FakeExecutor()
-    rec = Reconciler(paths, ex)
+    rec = Reconciler(paths, ex, grace_seconds=0)  # adopt as soon as death is seen
     rec.reconcile_once()
     first = TaskStore(paths).get("T-1").lease
     assert first is not None
@@ -235,7 +261,7 @@ def test_local_process_executor_adopts_dead_process(tmp_path):
     paths = _paths(tmp_path)
     TaskStore(paths).create(_ready_task(command="exit 7"))  # dies, writes no receipt
     ex = LocalProcessExecutor(paths.runtime)
-    rec = Reconciler(paths, ex)
+    rec = Reconciler(paths, ex, grace_seconds=0)
 
     rec.reconcile_once()
     first = TaskStore(paths).get("T-1").lease
@@ -247,3 +273,91 @@ def test_local_process_executor_adopts_dead_process(tmp_path):
     assert t.state is TaskState.RUNNING
     assert t.lease.worker_id != first.worker_id
     _no_fail(paths)
+
+
+# --- crash-consistency fixes (PR review) ------------------------------------
+
+
+def test_persists_running_and_lease_before_external_launch(tmp_path):
+    """INV: desired authoritative state is committed BEFORE actuation, so a crash
+    between persist and launch cannot double-actuate."""
+    paths = _paths(tmp_path)
+    store = TaskStore(paths)
+    store.create(_ready_task())
+
+    seen = {}
+
+    class PeekExecutor(FakeExecutor):
+        def launch(self, task, lease):
+            t = store.get(task.id)                 # what is durably persisted at launch time?
+            seen["state"] = t.state
+            seen["lease_id"] = t.lease.lease_id if t.lease else None
+            return super().launch(task, lease)
+
+    Reconciler(paths, PeekExecutor()).reconcile_once()
+    assert seen["state"] is TaskState.RUNNING
+    assert seen["lease_id"] == store.get("T-1").lease.lease_id
+
+
+def test_grace_prevents_premature_adoption(tmp_path):
+    paths = _paths(tmp_path)
+    TaskStore(paths).create(_ready_task())
+    ex = FakeExecutor()
+    clk = _Clock()
+    rec = Reconciler(paths, ex, clock=clk, grace_seconds=30)
+    rec.reconcile_once()                              # launch at t0
+    lease = TaskStore(paths).get("T-1").lease
+    ex.kill(lease.worker_id)                          # looks dead...
+
+    clk.advance(10)                                   # ...but only 10s < 30s grace
+    rep = rec.reconcile_once()
+    assert rep.adopted == [] and rep.waiting_grace == ["T-1"]
+    still = TaskStore(paths).get("T-1")
+    assert still.state is TaskState.RUNNING
+    assert still.lease.worker_id == lease.worker_id   # live worker's lease NOT revoked
+
+    clk.advance(25)                                   # now 35s > grace -> durably dead
+    rep = rec.reconcile_once()
+    assert rep.adopted == ["T-1"]
+    assert TaskStore(paths).get("T-1").lease.worker_id != lease.worker_id
+    _no_fail(paths)
+
+
+def test_adoption_is_atomic_and_audited(tmp_path):
+    """Lease rotation goes through the authoritative boundary: WORKER_ADOPTED
+    names the dead worker, and no RUNNING-without-lease is ever persisted."""
+    paths = _paths(tmp_path)
+    TaskStore(paths).create(_ready_task())
+    ex = FakeExecutor()
+    rec = Reconciler(paths, ex, grace_seconds=0)
+    rec.reconcile_once()
+    first = TaskStore(paths).get("T-1").lease
+    ex.kill(first.worker_id)
+    rec.reconcile_once()
+
+    adopted = [e for e in _events(paths) if e["type"] == "WORKER_ADOPTED"]
+    assert adopted and adopted[0]["payload"]["dead_worker_id"] == first.worker_id
+    _no_fail(paths)  # doctor never saw RUNNING without an authoritative lease
+
+
+def test_local_process_launch_is_idempotent_per_lease(tmp_path):
+    paths = _paths(tmp_path)
+    ex = LocalProcessExecutor(paths.runtime)
+    task = _ready_task(command="sleep 5")
+    lease = Lease("W-idem", "L-idem")
+    h1 = ex.launch(task, lease)
+    h2 = ex.launch(task, lease)                       # already alive -> no second process
+    assert h1.session_handle == h2.session_handle
+    ex.stop("W-idem")
+
+
+def test_single_reconciler_lock_is_exclusive(tmp_path):
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    with single_reconciler(rt):
+        with pytest.raises(ReconcilerBusy):
+            with single_reconciler(rt):
+                pass
+    # released -> acquirable again
+    with single_reconciler(rt):
+        pass
