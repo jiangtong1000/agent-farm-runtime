@@ -1,17 +1,24 @@
-# V2_DESIGN.md — durable-state-driven farm runtime (v0.2)
+# V2_DESIGN.md — durable-state-driven farm runtime (v0.3)
 
-Status: DESIGN ONLY. No production code changes. This freezes the contract
-before implementation, the same discipline we apply to tasks
-(registration-before-execution). Derived from the empirical review of the
-2026-08-31 → 09-02 farm operation: every failure was in the ephemeral
-coordination layer (tmux, nudger, master session memory); durable on-disk
-state and decoupled SLURM compute never failed. V2 makes that separation
-deliberate: the coordination layer itself derives from durable state, so any
-actor (reconciler, master, worker) is reconstructable and replaceable.
+Status: CONTRACT ALIGNED TO IMPLEMENTATION. The minimal actuation layer is now
+implemented in `src/agent_farm_runtime/` and validated by real-codex canaries
+(launch, crash-adoption, resume; see §10). v0.2 was DESIGN ONLY; v0.3 pins the
+representations that implementation settled and RATIFIES the actuation semantics
+that v0.2 deferred (lease rotation, grace-based death detection, crash-consistent
+ordering, the structured receipt primitive). The next phase is NOT further
+feature development but running an isolated canary farm on this contract.
 
-Each section is marked **[FROZEN]** (semantics we commit to now) or
-**[PROVISIONAL]** (concrete representation, to be pinned during
-implementation and free to change without reopening the frozen contract).
+Derived from the empirical review of the 2026-08-31 → 09-02 farm operation:
+every failure was in the ephemeral coordination layer (tmux, nudger, master
+session memory); durable on-disk state and decoupled SLURM compute never failed.
+V2 makes that separation deliberate: the coordination layer itself derives from
+durable state, so any actor (reconciler, master, worker) is reconstructable and
+replaceable.
+
+Each section is marked **[FROZEN]** (semantics we commit to), **[PINNED v0.3]**
+(a representation implementation settled) or **[PROVISIONAL]** (still free to
+change without reopening the frozen contract). §10 maps every invariant and
+mechanism to the code that realizes it and lists what remains deferred.
 
 ---
 
@@ -79,6 +86,36 @@ Each is anchored to a real failure mode from the reviewed operation.
   consumer. *(duplicate event)* (Global monotonic SEQUENCE is deferred — see
   §5, to avoid inventing a new coordination race before events become a
   signal bus.)
+
+The following were introduced when actuation was implemented (v0.3); each is
+anchored to a concrete correctness risk found in review or canary.
+
+- **INV-9 Persist desired state before external actuation.** The authoritative
+  RUNNING+lease is committed to the Task Store BEFORE any worker is launched,
+  and on adoption the NEW ownership is committed BEFORE the stale generation is
+  stopped. A reconciler crash between the durable write and the external side
+  effect therefore never double-actuates and never orphans a task. Launch is
+  idempotent for a given lease. *(review: crash between actuation and store
+  write could relaunch work)*
+
+- **INV-10 Durable death before revocation (grace).** A lease is rotated off a
+  worker only when that worker is DURABLY dead: not observed alive AND no valid
+  receipt AND no heartbeat within a grace window. A single transient liveness
+  miss never revokes a live worker's lease (guards INV-5 from the observer
+  side). *(review: a transient pgrep/proc miss must not revoke a live worker)*
+
+- **INV-11 Stable worker identity.** A worker's liveness is judged by a stable
+  process identity — `(pid, starttime)` — recorded at launch AND refreshed
+  identically on resume, never by a workspace-wide process scan. A recycled pid
+  or a sibling process is never mistaken for the worker; a resumed worker is
+  tracked as its current process, not its dead original. *(review: resume left
+  liveness pointing at the dead original → false adoption; codex runs as
+  `node`, so name-based identity is wrong)*
+
+- **INV-12 One active task per workspace.** A workspace holds one agent's mutable
+  state (LEDGER, session id, master notes); at most one task in an active state
+  (RUNNING/WAITING) may reference a given workspace. `doctor` FAILs otherwise.
+  *(two workers in one workspace would corrupt each other's state)*
 
 ---
 
@@ -159,9 +196,23 @@ These are expected to change during implementation without reopening §1–§4.
 
 - **Concrete field sets** (below in §6) — minimal now; add only when an
   invariant demands it.
-- **File layout / storage** — where Task Store / Registry / Event Log physically
-  live (per-task JSON? one store file? sqlite?), locking mechanism for INV-6.
-- **Heartbeat timeout** and **reconciler polling cadence** — numbers TBD.
+- **File layout / storage** — **[PINNED v0.3]** project-local `.farm/`:
+  `tasks/<id>.json` (authoritative, atomic write via temp+fsync+rename),
+  `workers/<id>.json` (observed), `events/log.ndjson` (append-only),
+  `runtime/` (reconcile lock, per-worker executor state, receipts). INV-6
+  locking is a non-blocking `flock` on `runtime/reconcile.lock`. Not sqlite; a
+  single reconciler + atomic per-file writes suffice at farm scale.
+- **Heartbeat / grace** — **[PINNED v0.3]** death is declared only after a grace
+  window with no heartbeat and no receipt (INV-10); default 60s, operator-set
+  via `--grace-seconds`. **Reconciler cadence** — operator-set via
+  `reconcile --loop --interval` (no fixed number baked in).
+- **Structured receipt primitive** — **[PINNED v0.3]** the worker→runtime signal
+  deferred in v0.2 (§8/§9) is now real: a worker writes a fenced JSON
+  `Receipt {worker_id, task_id, lease_id, status: RUNNING|AWAITING|SUBMITTED|
+  FAILED, ts, note, waiting_on}` atomically; the reconciler applies it ONLY if
+  `lease_id` matches the task's authoritative lease (fencing), mapping
+  AWAITING→WAITING, SUBMITTED→SUBMITTED, FAILED→FAILED. A worker never asserts
+  DONE (INV-7). It is a structured receipt/event, not a free-text ledger.
 - **Event representation** and, specifically, **global monotonic sequence
   allocation** — DEFERRED. Events currently carry only a unique id and are
   audit-only. A global monotonic sequence + cursor bus is designed only when
@@ -227,6 +278,14 @@ ts       wall clock (audit only)
 ---
 
 ## 8. Minimal shadow V2 (read-only; proves the model before any control) [PROVISIONAL]
+
+Status note (v0.3): shadow was the planned way to de-risk the model before any
+control. In practice the model was validated directly by ISOLATED canaries — a
+dedicated tmux server + a separate session, live farm untouched — exercising real
+launch, crash-adoption, and resume (§10). Shadow (`farm shadow`) remains
+available and useful as a read-only differential tool against a running farm, but
+is no longer a prerequisite gate. The sections below are retained as the shadow
+contract for that tool.
 
 Goal: a READ-ONLY reconciler that derives task state from existing artifacts
 and LOGS what it WOULD do, compared event-by-event against the live nudger.
@@ -319,3 +378,65 @@ SLURM state, explicit `.awaiting` conditions, and artifact/ruling refs that
 already exist. Wake cases that depend on "did the worker read this master
 message" are expected to surface as observability-gaps, not forced coverage —
 that gap is itself the deliverable pointing to the canary receipt primitive.
+
+---
+
+## 10. Implementation status (v0.3) [maps contract → code]
+
+The minimal actuation layer is implemented and validated by real-codex canaries
+(isolated tmux server, live farm untouched). This section is the authoritative
+map from contract to code; it does not add new semantics.
+
+### 10.1 Invariant → realization
+| Invariant | Realized by |
+|---|---|
+| INV-1 durable authority | `store.TaskStore` (per-task JSON is the only authoritative read) |
+| INV-2 reconstructable orchestrators | reconciler + master hold no state; all state in `.farm/` |
+| INV-3 compute decoupled | runtime records `waiting_on: job:<id>`; never submits/cancels SLURM |
+| INV-4 state, not clock | control reads task state; only death-detection compares a heartbeat clock (a mechanism, §INV-10) |
+| INV-5 fencing lease | `transitions.validate_transition` rejects a stale `lease_id`; receipts fenced by `lease_id` |
+| INV-6 serialized reconcile | `locking.single_reconciler` (flock); `reconcile_once` is idempotent |
+| INV-7 one mutation path | `Reconciler._commit` (durable write + event) for BOTH transitions and lease acquire/rotate/release; DONE needs recorded acceptance |
+| INV-8 idempotent events | `events.EventLog` append-only, unique ids |
+| INV-9 persist-before-actuate | `_start` commits RUNNING+lease before `executor.launch`; commits new ownership before stopping the stale generation; launch idempotent per lease |
+| INV-10 durable death (grace) | `_durably_dead` (no heartbeat within `grace_seconds` + no receipt) gates `rotate_lease` |
+| INV-11 stable worker identity | `procutil` `(pid, starttime)` recorded at launch AND resume via one shared shell block; liveness never a workspace pgrep |
+| INV-12 one active task per workspace | `doctor` FAILs on two RUNNING/WAITING tasks sharing `metadata.workspace` |
+
+### 10.2 Ratified from v0.2 deferrals
+- **Lease rotation** (acquire/rotate/release) is now a first-class authoritative
+  mutation through `_commit` (was flagged in v0.2 as "beyond the frozen graph").
+  `rotate_lease` requires a `reason` establishing death and is guarded to never
+  rotate off a possibly-live holder.
+- **Structured receipt/ack primitive** (v0.2 §8/§9 "observability gap") is
+  implemented and fenced (§5, PINNED).
+- **INV-6 lock** is a real flock (v0.2 listed it as TBD).
+
+### 10.3 Executors & session handling
+- `adapters/base.WorkerExecutor` = `launch / resume / poll / stop`.
+- `adapters/local_process.LocalProcessExecutor` — real subprocesses; identity via
+  `(pid, starttime)`; reaps zombies.
+- `adapters/codex.CodexTmuxExecutor` — codex workers in a tmux session on a
+  DEDICATED tmux server (`-L <socket>`), a session separate from any live
+  `farm`; never kills/moves windows; pane identity = worker id; cluster
+  specifics in `CodexClusterConfig` (no personal paths in the module). The codex
+  session id is captured from the worker's OWN log (`session id: <uuid>`),
+  race-free; resume reuses it under the same lease.
+
+### 10.4 Canary evidence (real codex, isolated)
+- Launch happy-path: READY→…→SUBMITTED→DONE, doctor PASS, live farm untouched.
+- Crash-adoption: worker killed mid-run → `LEASE_ROTATED`+`WORKER_ADOPTED` (new
+  lease), task state survived; successor recovered from durable workspace state.
+- Resume identity: worker AWAITING→ends (pid dead) → resume refreshes the
+  `(pid,starttime)` identity to the live process → stays alive across grace, no
+  false adoption → SUBMITTED→DONE.
+
+### 10.5 Still deferred (unchanged from v0.2 unless noted)
+- WAITING-condition OBSERVERS (`job:`/`artifact:`/`task:`/`ruling:` auto-unblock)
+  — the reconciler resumes on an injected predicate; the observers that evaluate
+  those conditions are the next build item (post-merge).
+- Event-as-signal-bus + global monotonic sequence/cursors (V2.1).
+- `rev`/CAS (single-reconciler lock + fencing suffice).
+- `decision_owner` / durable multi-master routing.
+- Priority scheduling; SLURM submit/cancel; enforcement against non-cooperative
+  (receipt-less) workers.

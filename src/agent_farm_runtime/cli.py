@@ -42,10 +42,74 @@ def cmd_task_create(args: argparse.Namespace) -> int:
     paths = FarmPaths(farm_root(Path(args.project)))
     paths.ensure()
     task_id = args.id or f"T-{uuid.uuid4().hex[:8]}"
-    task = Task(id=task_id, objective=args.objective, deliverable=args.deliverable, acceptance=args.acceptance)
+    metadata: dict = {}
+    if args.command:
+        metadata["command"] = args.command
+    if args.cwd:
+        metadata["cwd"] = args.cwd
+    if args.workspace:
+        metadata["workspace"] = args.workspace
+    brief = args.brief
+    if args.brief_file:
+        brief = Path(args.brief_file).read_text()
+    if brief:
+        metadata["brief"] = brief
+    if args.agent_label:
+        metadata["agent_label"] = args.agent_label
+    task = Task(
+        id=task_id,
+        objective=args.objective,
+        deliverable=args.deliverable,
+        acceptance=args.acceptance,
+        metadata=metadata,
+    )
     TaskStore(paths).create(task)
     print(task_id)
     return 0
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    import time
+
+    from .locking import ReconcilerBusy, single_reconciler
+    from .reconciler import Reconciler
+
+    paths = FarmPaths(farm_root(Path(args.project)))
+    paths.ensure()
+    if args.executor == "codex-tmux":
+        from .adapters.codex import CodexTmuxExecutor
+        executor = CodexTmuxExecutor(
+            paths.runtime, session=args.session, tmux_socket=args.tmux_socket
+        )
+    else:
+        from .adapters.local_process import LocalProcessExecutor
+        executor = LocalProcessExecutor(paths.runtime)
+    reconciler = Reconciler(paths, executor, grace_seconds=args.grace_seconds)
+
+    def one_pass() -> None:
+        rep = reconciler.reconcile_once()
+        print(json.dumps({
+            "launched": rep.launched,
+            "adopted": rep.adopted,
+            "advanced": rep.advanced,
+            "resumed": rep.resumed,
+            "heartbeats": rep.heartbeats,
+            "ignored_stale": rep.ignored_stale,
+            "waiting_grace": rep.waiting_grace,
+        }, sort_keys=True))
+
+    # INV-6: at most one reconciler mutates a farm at a time.
+    try:
+        with single_reconciler(paths.runtime):
+            if not args.loop:
+                one_pass()
+                return 0
+            while True:
+                one_pass()
+                time.sleep(args.interval)
+    except ReconcilerBusy as exc:
+        print(f"reconciler busy: {exc}")
+        return 1
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -89,6 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--objective", required=True)
     p.add_argument("--deliverable", required=True)
     p.add_argument("--acceptance", required=True)
+    p.add_argument("--command", help="worker command (metadata.command) for the local-process executor")
+    p.add_argument("--cwd", help="working directory for the worker command")
+    p.add_argument("--workspace", help="abs workspace dir (metadata.workspace) for the codex-tmux executor")
+    p.add_argument("--brief", help="agent-facing brief (metadata.brief) for the codex-tmux executor")
+    p.add_argument("--brief-file", help="read the agent brief from this file")
+    p.add_argument("--agent-label", help="tmux window name for the codex-tmux worker")
     p.set_defaults(func=cmd_task_create)
     p = sub.add_parser("task-list", help="list task contracts")
     p.set_defaults(func=cmd_task_list)
@@ -97,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("shadow", help="read-only shadow observation of existing workspaces")
     p.add_argument("workspaces")
     p.set_defaults(func=cmd_shadow)
+    p = sub.add_parser("reconcile", help="run the actuating control loop")
+    p.add_argument("--executor", choices=["local-process", "codex-tmux"],
+                   default="local-process", help="worker backend (default: local-process)")
+    p.add_argument("--session", default="farm2", help="tmux session for codex-tmux (never the live `farm`)")
+    p.add_argument("--tmux-socket", default=None, help="dedicated tmux server socket (-L) for isolation")
+    p.add_argument("--grace-seconds", type=float, default=60.0,
+                   help="seconds a leased worker may be unobserved before its lease is rotated")
+    p.add_argument("--loop", action="store_true", help="run continuously instead of one pass")
+    p.add_argument("--interval", type=float, default=10.0, help="seconds between passes in --loop")
+    p.set_defaults(func=cmd_reconcile)
     return parser
 
 
