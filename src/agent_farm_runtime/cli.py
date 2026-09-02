@@ -62,12 +62,18 @@ def cmd_task_create(args: argparse.Namespace) -> int:
 def cmd_reconcile(args: argparse.Namespace) -> int:
     import time
 
-    from .adapters.local_process import LocalProcessExecutor
     from .reconciler import Reconciler
 
     paths = FarmPaths(farm_root(Path(args.project)))
     paths.ensure()
-    executor = LocalProcessExecutor(paths.runtime)
+    if args.executor == "codex-tmux":
+        from .adapters.codex import CodexTmuxExecutor
+        executor = CodexTmuxExecutor(
+            paths.runtime, session=args.session, tmux_socket=args.tmux_socket
+        )
+    else:
+        from .adapters.local_process import LocalProcessExecutor
+        executor = LocalProcessExecutor(paths.runtime)
     reconciler = Reconciler(paths, executor)
 
     def one_pass() -> None:
@@ -140,7 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("shadow", help="read-only shadow observation of existing workspaces")
     p.add_argument("workspaces")
     p.set_defaults(func=cmd_shadow)
-    p = sub.add_parser("reconcile", help="run the actuating control loop (local-process executor)")
+    p = sub.add_parser("reconcile", help="run the actuating control loop")
+    p.add_argument("--executor", choices=["local-process", "codex-tmux"],
+                   default="local-process", help="worker backend (default: local-process)")
+    p.add_argument("--session", default="farm2", help="tmux session for codex-tmux (never the live `farm`)")
+    p.add_argument("--tmux-socket", default=None, help="dedicated tmux server socket (-L) for isolation")
     p.add_argument("--loop", action="store_true", help="run continuously instead of one pass")
     p.add_argument("--interval", type=float, default=10.0, help="seconds between passes in --loop")
     p.set_defaults(func=cmd_reconcile)

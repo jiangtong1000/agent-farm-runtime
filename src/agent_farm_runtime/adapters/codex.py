@@ -168,10 +168,15 @@ class CodexTmuxExecutor:
         runtime_dir: Path,
         *,
         session: str = "farm2",
+        tmux_socket: str | None = None,
         run: Callable[[list[str]], subprocess.CompletedProcess] = _default_run,
         is_alive: Callable[[str], bool] = _default_is_alive,
     ):
         self.session = session
+        # A dedicated tmux SERVER (via -L <socket>) fully isolates canary/runtime
+        # windows from a live farm sharing the same host: a crash of one server
+        # cannot take down the other. None = default server (shared).
+        self.tmux_socket = tmux_socket
         self.run = run
         self.is_alive = is_alive
         self.state_dir = Path(runtime_dir) / "codex_workers"
@@ -198,18 +203,24 @@ class CodexTmuxExecutor:
 
     # -- tmux helpers (create-if-absent + send-keys only) --------------------
 
+    def _tmux(self, *args: str) -> list[str]:
+        base = ["tmux"]
+        if self.tmux_socket:
+            base += ["-L", self.tmux_socket]
+        return base + list(args)
+
     def _ensure_window(self, window: str, cwd: str) -> None:
-        has = self.run(["tmux", "has-session", "-t", self.session])
+        has = self.run(self._tmux("has-session", "-t", self.session))
         if has.returncode != 0:
-            self.run(["tmux", "new-session", "-d", "-s", self.session,
-                      "-n", window, "-c", cwd])
+            self.run(self._tmux("new-session", "-d", "-s", self.session,
+                                 "-n", window, "-c", cwd))
             return
-        listed = self.run(["tmux", "list-windows", "-t", self.session, "-F", "#{window_name}"])
+        listed = self.run(self._tmux("list-windows", "-t", self.session, "-F", "#{window_name}"))
         if window not in (listed.stdout or "").split():
-            self.run(["tmux", "new-window", "-t", self.session, "-n", window, "-c", cwd])
+            self.run(self._tmux("new-window", "-t", self.session, "-n", window, "-c", cwd))
 
     def _send(self, window: str, line: str) -> None:
-        self.run(["tmux", "send-keys", "-t", f"{self.session}:{window}", line, "Enter"])
+        self.run(self._tmux("send-keys", "-t", f"{self.session}:{window}", line, "Enter"))
 
     # -- WorkerExecutor protocol ---------------------------------------------
 
@@ -286,6 +297,6 @@ class CodexTmuxExecutor:
         st = self._load_state(worker_id)
         if st is None:
             return
-        # send Ctrl-C into the window, then a scoped pkill by cwd match is done
-        # by the caller's environment; here we C-c the interactive pane.
-        self.run(["tmux", "send-keys", "-t", f"{self.session}:{st['window']}", "C-c"])
+        # send Ctrl-C into the window to interrupt codex; leaves the window intact
+        # (no window surgery). A scoped pkill-by-cwd is left to the environment.
+        self.run(self._tmux("send-keys", "-t", f"{self.session}:{st['window']}", "C-c"))

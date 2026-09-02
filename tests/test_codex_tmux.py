@@ -95,6 +95,20 @@ def test_defaults_to_a_separate_session_never_touches_live_farm(tmp_path):
     assert all(t == "farm2" or t.startswith("farm2:") for t in rec.tmux_targets())
 
 
+def test_dedicated_tmux_socket_isolates_from_live_farm(tmp_path):
+    rt = tmp_path / "runtime"; rt.mkdir()
+    ws = tmp_path / "ws"; ws.mkdir()
+    rec = TmuxRecorder()
+    ex = CodexTmuxExecutor(rt, session="farm2", tmux_socket="canary", run=rec)
+    ex.launch(_task(ws), Lease("W-1", "L1"))
+    # every tmux call must go to the dedicated server (-L canary): a crash of the
+    # canary server cannot take down the live farm on the default server
+    tmux_calls = [c for c in rec.calls if c and c[0] == "tmux"]
+    assert tmux_calls
+    for c in tmux_calls:
+        assert c[1:3] == ["-L", "canary"], c
+
+
 def test_poll_reads_fenced_receipt(tmp_path):
     rt = tmp_path / "runtime"; rt.mkdir()
     ws = tmp_path / "ws"; ws.mkdir()
