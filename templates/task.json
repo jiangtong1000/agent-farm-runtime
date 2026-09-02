@@ -1,0 +1,9 @@
+{
+  "id": "T-example",
+  "objective": "What this task must achieve",
+  "deliverable": "artifacts/T-example/result.md",
+  "acceptance": "Concrete evidence required before DONE",
+  "state": "READY",
+  "lease": null,
+  "metadata": {}
+}
