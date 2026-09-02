@@ -15,50 +15,51 @@ The design is derived from real failure modes in a live SSH/tmux/SLURM agent far
 
 ## Current status
 
-**Minimal actuator landed (canary stage). Codex/tmux backend still pending.**
+**v0.3 — actuation implemented and validated by real-codex canaries.** The
+contract in [`V2_DESIGN.md`](V2_DESIGN.md) is aligned to the code (§10 maps every
+invariant to its implementation). The next phase is running an isolated canary
+farm, not more feature development.
 
-Safe foundation (unchanged):
+Foundation:
 
-- task / worker / event models;
-- atomic durable task storage;
-- legal lifecycle validation;
-- lease/fencing validation helpers;
-- invariant checks (`farm doctor`);
-- read-only shadow observations (`farm shadow`);
-- cluster/project templates;
-- regression tests for the frozen invariants.
+- task / worker / event models; atomic durable task storage;
+- legal lifecycle validation; lease/fencing validation;
+- invariant checks (`farm doctor`); read-only shadow observations (`farm shadow`);
+- cluster/project templates; regression tests for the invariants.
 
-Actuation (new — the control loop that drives disposable workers):
+Actuation — the control loop that drives disposable workers:
 
 - `Reconciler.reconcile_once` — one serialized, idempotent pass (INV-6) that
   actuates `READY` tasks, applies fenced worker receipts, adopts crashed
   workers, resumes unblocked `WAITING` tasks, and repairs the observed registry;
-- **crash-consistency**: desired authoritative state (RUNNING + lease) is
-  persisted BEFORE any external launch, so a reconciler crash between the two
-  never double-actuates; launch is idempotent per lease;
-- **grace policy**: a lease is rotated off a worker only when it is *durably*
-  dead (no receipt and no heartbeat within `grace_seconds`) — a single transient
-  liveness miss never revokes a live worker's lease (INV-5);
-- **single-reconciler lock** (`locking.single_reconciler`, flock): two
-  `farm reconcile` processes cannot race on one farm (INV-6);
-- every authoritative mutation — state transition AND lease acquire/rotate/
-  release — goes through one durable-write + event boundary (INV-7);
-- structured **receipt** primitive (`RUNNING`/`AWAITING`/`SUBMITTED`/`FAILED`),
-  fenced by `lease_id` so a superseded worker generation cannot advance a task;
-- **lease rotation** (`rotate_lease`) — releases a lease from a *proven-dead*
-  holder so the task can be re-actuated with state preserved. This is the
-  "adopt a stopped task" primitive and is a **design delta beyond frozen v0.2**
-  (state graph froze before actuation), pending ratification into v0.3;
-- `WorkerExecutor` backends: `FakeExecutor` (tests) and `LocalProcessExecutor`
-  (drives real OS subprocesses — the honest bridge before a codex/tmux backend);
-- `farm reconcile [--loop]` CLI.
+- **crash-consistency** (INV-9): the authoritative RUNNING+lease is persisted
+  BEFORE any launch, and on adoption new ownership is committed BEFORE the stale
+  generation is stopped — so a reconciler crash never double-actuates or orphans
+  a task; launch is idempotent per lease;
+- **grace policy** (INV-10): a lease is rotated off a worker only when it is
+  *durably* dead (no receipt and no heartbeat within `--grace-seconds`) — a
+  single transient liveness miss never revokes a live worker's lease (INV-5);
+- **stable worker identity** (INV-11): liveness is a recorded `(pid, starttime)`
+  set at launch AND refreshed identically on resume — never a workspace-wide
+  process scan; a recycled pid or a resumed worker's dead original is never
+  mistaken for the live worker;
+- **single-reconciler lock** (`locking.single_reconciler`, flock, INV-6);
+- one authoritative-mutation boundary (INV-7): every state transition AND lease
+  acquire/rotate/release goes through a durable-write + event;
+- structured, atomically-written **receipt** primitive
+  (`RUNNING`/`AWAITING`/`SUBMITTED`/`FAILED`), fenced by `lease_id`;
+- **lease rotation** (`rotate_lease`) — the "adopt a stopped task" primitive,
+  ratified into the v0.3 contract; requires a `reason` establishing death and
+  can never rotate off a possibly-live holder;
+- **one active task per workspace** (INV-12): `doctor` FAILs on two active tasks
+  sharing a workspace;
+- `WorkerExecutor` backends: `FakeExecutor` (tests), `LocalProcessExecutor` (real
+  subprocesses), and **`CodexTmuxExecutor`** (real codex workers in a dedicated,
+  isolated tmux server; cluster specifics in `CodexClusterConfig`);
+- `farm reconcile [--executor codex-tmux] [--loop]` CLI.
 
-A worker never drives `DONE`: `DONE` still requires recorded acceptance, which
-is a master/harness judgment (Layer-1/Layer-2 boundary).
-
-Still deferred: the **codex/tmux executor backend** (real farm workers), SLURM
-job mutation, WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:`),
-and enforcement against live (non-cooperative) workers.
+A worker never drives `DONE`: `DONE` still requires recorded acceptance, a
+master/harness judgment (Layer-1/Layer-2 boundary).
 
 ## Design rule
 
@@ -141,19 +142,18 @@ Cluster-specific behavior belongs behind adapters. The core task semantics shoul
 
 ## What is deliberately deferred
 
-- codex/tmux executor backend (real farm workers; `LocalProcessExecutor` is the
-  current real backend and the pattern to specialize);
+- WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:` predicates):
+  the reconciler resumes on an injected `unblock` predicate; the observers that
+  evaluate those conditions are the next build item;
 - enforcement of leases against live *non-cooperative* workers (fencing today
   assumes workers echo their `lease_id`);
-- WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:` predicates);
 - SLURM job submission/cancellation;
 - automatic scientific acceptance (DONE stays a master/harness judgment);
 - priority scheduling;
-- multi-master routing;
-- event stream as a signal bus;
-- global event sequence/cursors.
+- multi-master routing (`decision_owner`);
+- event stream as a signal bus; global event sequence/cursors.
 
-These should be introduced only when shadow/canary evidence requires them.
+These are introduced only when canary evidence requires them (see V2_DESIGN §10.5).
 
 ## Actuation quick start
 
@@ -170,13 +170,30 @@ The worker reads `FARM_RECEIPT_PATH`, `FARM_WORKER_ID`, `FARM_TASK_ID`,
 `FARM_LEASE_ID` from its environment and writes a JSON `Receipt` to
 `FARM_RECEIPT_PATH` when it reaches a wait boundary, submits, or fails.
 
+For real codex workers, create the task with `--workspace`/`--brief`(`--brief-file`)
+and drive it with the codex-tmux executor on a dedicated, isolated tmux server
+(never the live `farm` session):
+
+```bash
+farm --project P task-create --id T-1 \
+  --objective "..." --deliverable "..." --acceptance "..." \
+  --workspace /abs/workspace --brief-file BRIEF.md
+farm --project P reconcile --executor codex-tmux --session farm2 --tmux-socket canary
+```
+
+The executor drops a `.farm_receipt.py` helper into the workspace; the agent
+records `AWAITING`/`SUBMITTED`/`FAILED` with it (the helper echoes the lease id
+for fencing). Cluster specifics (PATH prelude, codex command) come from
+`CodexClusterConfig` / `FARM_CODEX_*` env, not the module.
+
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+pip install -e ".[dev]"
+python -m pytest -q
 ```
 
-The regression suite is intended to turn historical orchestration failures into permanent invariants.
+The regression suite turns historical orchestration failures (and each review finding) into permanent invariants.
 
 ## License
 
