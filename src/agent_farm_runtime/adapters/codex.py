@@ -42,8 +42,13 @@ try:
     }
 except KeyError as e:
     sys.exit(f"runtime env missing: {e}")
-with open(path, "w") as fh:
+# atomic write: the reconciler must never read a half-written receipt
+tmp = f"{path}.tmp.{os.getpid()}"
+with open(tmp, "w") as fh:
     json.dump(receipt, fh)
+    fh.flush()
+    os.fsync(fh.fileno())
+os.replace(tmp, path)
 print(f"receipt {a.status} -> {path}")
 '''
 
@@ -110,55 +115,80 @@ def _prelude(cfg: CodexClusterConfig) -> str:
     return (cfg.path_prelude + "\n") if cfg.path_prelude else ""
 
 
+def _run_and_record(
+    *, invocation: str, log_name: str, pid_file: str, sid_path: str | None,
+    append_log: bool, delay: int,
+) -> str:
+    """Shared tail used by BOTH launch and resume: background the codex
+    invocation, record THIS invocation's (pid, starttime) identity to `pid_file`,
+    optionally capture the session id from this worker's own log, then wait.
+
+    Because launch and resume share this block, a resumed worker's pid identity is
+    refreshed exactly like a launched one -- so poll() liveness always tracks the
+    CURRENT codex process, never a resumed worker's dead original invocation.
+    """
+    tee = f"tee -a {shlex.quote(log_name)}" if append_log else f"tee {shlex.quote(log_name)}"
+    sid_capture = ""
+    if sid_path is not None:  # only launch needs to discover the id; resume reuses it
+        sid_capture = f"""# race-free session id: codex prints it into THIS worker's own log at startup
+( for _ in $(seq 1 {delay}); do
+    sid=$(grep -oiE 'session id: [0-9a-f-]{{36}}' {shlex.quote(log_name)} 2>/dev/null | grep -oE '[0-9a-f-]{{36}}' | head -1)
+    [ -n "$sid" ] && {{ echo "$sid" > {shlex.quote(sid_path)}; break; }}
+    sleep 1
+  done ) &
+"""
+    return f"""{invocation} > >({tee}) 2>&1 &
+_CPID=$!
+_ST=$(awk '{{s=substr($0,index($0,") ")+2); n=split(s,a," "); print a[20]}}' /proc/$_CPID/stat 2>/dev/null)
+echo "$_CPID $_ST" > {shlex.quote(pid_file)}
+{sid_capture}wait $_CPID
+"""
+
+
 def render_launch_script(
     *, cfg: CodexClusterConfig, workspace: str, worker_id: str, task_id: str,
     lease_id: str, receipt_path: str, brief: str, log_name: str, sid_path: str,
     pid_file: str,
 ) -> str:
     """Headless-codex launch mirroring the proven RESTART_HEADLESS.sh, plus the
-    runtime env + receipt protocol.
-
-    Worker identity: codex is started in the background so its exact pid is known;
-    the pid and its /proc start-time are written to `pid_file` as a stable
-    (pid,starttime) identity (liveness is per-worker, never a workspace-wide
-    pgrep). Session-id capture greps the session id codex prints at startup into
-    THIS worker's own (per-worker) log -- race-free even when several codex
-    workers start concurrently, and with no dependence on the shared sessions dir.
-    """
+    runtime env + receipt protocol. Records (pid,starttime) identity and captures
+    the session id from this worker's own log (see _run_and_record)."""
     full_brief = brief.rstrip() + "\n\n" + receipt_instruction(receipt_path)
-    delay = cfg.session_id_capture_delay
+    body = _run_and_record(
+        invocation=f"{cfg.codex_cmd} {shlex.quote(full_brief)}",
+        log_name=log_name, pid_file=pid_file, sid_path=sid_path,
+        append_log=False, delay=cfg.session_id_capture_delay,
+    )
     return f"""#!/bin/bash
 cd {shlex.quote(workspace)}
 {_prelude(cfg)}{_env_exports(worker_id, task_id, lease_id, receipt_path)}
 rm -f {shlex.quote(receipt_path)}
-{cfg.codex_cmd} {shlex.quote(full_brief)} > >(tee {shlex.quote(log_name)}) 2>&1 &
-_CPID=$!
-_ST=$(awk '{{s=substr($0,index($0,") ")+2); n=split(s,a," "); print a[20]}}' /proc/$_CPID/stat 2>/dev/null)
-echo "$_CPID $_ST" > {shlex.quote(pid_file)}
-# race-free session id: codex prints it into THIS worker's own log at startup
-( for _ in $(seq 1 {delay}); do
-    sid=$(grep -oiE 'session id: [0-9a-f-]{{36}}' {shlex.quote(log_name)} 2>/dev/null | grep -oE '[0-9a-f-]{{36}}' | head -1)
-    [ -n "$sid" ] && {{ echo "$sid" > {shlex.quote(sid_path)}; break; }}
-    sleep 1
-  done ) &
-wait $_CPID
-"""
+{body}"""
 
 
 def render_resume_script(
     *, cfg: CodexClusterConfig, workspace: str, worker_id: str, task_id: str,
     lease_id: str, receipt_path: str, sid_path: str, log_name: str, wake_msg: str,
+    pid_file: str,
 ) -> str:
-    """Resume an existing codex session (mirrors WAKE.sh) under the same lease."""
+    """Resume an existing codex session (mirrors WAKE.sh) under the same lease.
+
+    Uses the SAME _run_and_record tail as launch, so the resumed process's
+    (pid,starttime) identity is written to `pid_file`; poll() then sees the live
+    resumed process instead of the dead original (the bug this fixes)."""
     full_msg = wake_msg.rstrip() + "\n\n" + receipt_instruction(receipt_path)
+    body = _run_and_record(
+        invocation=f'{cfg.codex_cmd} resume "$SID" {shlex.quote(full_msg)}',
+        log_name=log_name, pid_file=pid_file, sid_path=None,  # id unchanged on resume
+        append_log=True, delay=cfg.session_id_capture_delay,
+    )
     return f"""#!/bin/bash
 cd {shlex.quote(workspace)}
 {_prelude(cfg)}{_env_exports(worker_id, task_id, lease_id, receipt_path)}
 rm -f {shlex.quote(receipt_path)}
 SID=$(cat {shlex.quote(sid_path)} 2>/dev/null)
 if [ -z "$SID" ]; then echo "no session id at {sid_path}; cannot resume" >&2; exit 3; fi
-{cfg.codex_cmd} resume "$SID" {shlex.quote(full_msg)} 2>&1 | tee -a {shlex.quote(log_name)}
-"""
+{body}"""
 
 
 # --- liveness (default; injectable) -----------------------------------------
@@ -267,7 +297,9 @@ class CodexTmuxExecutor:
         if not ws or not brief:
             raise ValueError(f"task {task.id} needs metadata.workspace and metadata.brief")
         wid = lease.worker_id
-        window = task.metadata.get("agent_label") or wid
+        # tmux pane identity is the WORKER id, not a human agent_label: each worker
+        # generation gets its own unambiguous pane, so generations never collide.
+        window = wid
         workspace = str(Path(ws).resolve())
 
         # idempotent per lease: never start a second codex for THIS live worker
@@ -307,7 +339,7 @@ class CodexTmuxExecutor:
         resume_sh.write_text(render_resume_script(
             cfg=self.config, workspace=st["workspace"], worker_id=worker_id, task_id=task.id,
             lease_id=lease.lease_id, receipt_path=st["receipt_path"],
-            sid_path=st["sid_path"], log_name=st["log_name"],
+            sid_path=st["sid_path"], log_name=st["log_name"], pid_file=st["pid_file"],
             wake_msg=("Wake-up: a condition you were awaiting has fired or a new "
                       "MASTER_*.md landed. Re-scan your workspace, verify the awaited "
                       "state, acknowledge in LEDGER, and continue."),

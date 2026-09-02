@@ -419,6 +419,40 @@ def test_new_ownership_committed_before_stale_worker_stopped(tmp_path):
     assert stops[-1][1] != first.lease_id
 
 
+def test_resumed_worker_survives_grace_without_adoption(tmp_path):
+    """After a WAITING->RUNNING resume, the resumed worker's refreshed liveness
+    must keep it alive past the grace window -- no false adoption."""
+    paths = _paths(tmp_path)
+    TaskStore(paths).create(_ready_task())
+    ex = FakeExecutor()
+    clk = _Clock()
+    rec = Reconciler(paths, ex, clock=clk, grace_seconds=30,
+                     unblock=lambda t: t.metadata.get("waiting_on") == "job:1")
+    rec.reconcile_once()                                   # launch
+    lease = TaskStore(paths).get("T-1").lease
+    wid = lease.worker_id
+
+    # worker reaches a wait boundary and its process ENDS
+    ex.set_receipt(Receipt(wid, "T-1", lease.lease_id, ReceiptStatus.AWAITING,
+                           ts="t", waiting_on="job:1"))
+    rec.reconcile_once()
+    assert TaskStore(paths).get("T-1").state is TaskState.WAITING
+    ex.clear_receipt(wid)
+    ex.kill(wid)                                           # the awaiting worker exited
+
+    # unblock fires -> resume must refresh liveness (the bug: it didn't)
+    rep = rec.reconcile_once()
+    assert rep.resumed == ["T-1"]
+    assert TaskStore(paths).get("T-1").state is TaskState.RUNNING
+
+    clk.advance(10_000)                                    # far past grace
+    rep = rec.reconcile_once()
+    assert rep.adopted == []                               # NOT falsely adopted
+    assert wid in rep.heartbeats
+    assert TaskStore(paths).get("T-1").lease.worker_id == wid
+    _no_fail(paths)
+
+
 def test_pid_identity_rejects_recycled_pid(tmp_path):
     me = os.getpid()
     st = proc_starttime(me)

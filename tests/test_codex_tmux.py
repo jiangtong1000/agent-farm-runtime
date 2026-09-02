@@ -86,7 +86,7 @@ def test_launch_writes_scripts_and_sends_keys(tmp_path):
     assert "RUNTIME RECEIPT PROTOCOL" in launch          # receipt protocol appended
     # tmux: created the window and sent the launch command
     assert any("bash" in s and ".farm_launch_" in s for s in rec.sent())
-    assert handle.session_handle == "farm2:A"
+    assert handle.session_handle == "farm2:W-1"   # pane identity is the worker id
     # state persisted so poll/resume can find the worker later
     assert (rt / "codex_workers" / "W-1.json").exists()
 
@@ -189,6 +189,24 @@ def test_resume_and_stop_never_do_window_surgery(tmp_path):
     # the crash-lesson invariant: the executor never kills or moves windows
     for c in rec.calls:
         assert "kill-window" not in c and "kill-session" not in c and "move-window" not in c
+
+
+def test_resume_refreshes_worker_pid_identity_like_launch(tmp_path):
+    """The resume bug fix: resume must record THIS invocation's (pid,starttime) to
+    the same pid_file poll() reads, exactly as launch does -- otherwise liveness
+    points at the resumed worker's dead original."""
+    rt = tmp_path / "rt"; rt.mkdir()
+    ws = tmp_path / "ws"; ws.mkdir()
+    ex = CodexTmuxExecutor(rt, run=TmuxRecorder())
+    task = _task(ws)
+    ex.launch(task, Lease("W-1", "L1"))
+    (ws / ".session_id_W-1").write_text("01a00000-0000-7000-8000-000000000000")
+    ex.resume(task, "W-1", Lease("W-1", "L1"))
+    resume = next(ws.glob(".farm_resume_*.sh")).read_text()
+    pid_file = str(rt / "codex_workers" / "W-1.pid")
+    assert "$_CPID $_ST" in resume            # records pid+starttime, like launch
+    assert pid_file in resume                 # ...into the SAME pid_file poll() reads
+    assert 'resume "$SID"' in resume          # and it is a resume, not a fresh session
 
 
 # --- PR review fix: worker-specific liveness (not workspace-level pgrep) -----
