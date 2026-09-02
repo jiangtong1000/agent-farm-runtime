@@ -1,39 +1,136 @@
 # agent-farm-runtime
 
-A small, portable runtime for durable-state-driven multi-agent research farms.
+A small, portable runtime for durable-state-driven research agent farms.
 
-The core idea is simple:
+The runtime separates **scientific decisions** from **mechanical orchestration**:
 
-- **Task state is durable and authoritative.**
-- **Claude/master sessions and worker agents are replaceable.**
-- **A deterministic reconciler handles mechanical liveness and recovery.**
-- **Scientific decisions and acceptance remain explicit decision-layer actions.**
-- **Shadow-first migration is preferred over rewriting a live farm in place.**
+- **Claude Master**: decomposes tasks, sets acceptance criteria, makes scientific rulings, synthesizes results.
+- **Reconciler**: deterministic control loop; no scientific judgment.
+- **Workers**: disposable executors (Codex first, other backends later).
+- **Task Store**: the single authoritative current state.
+- **Worker Registry**: observed operational state; repairable, not authoritative.
+- **Event Log**: append-only audit history.
 
-This repository is intentionally small. It is meant to provide the orchestration substrate, not project-specific research knowledge.
+The design is derived from real failure modes in a live SSH/tmux/SLURM agent farm. The frozen contract lives in [`V2_DESIGN.md`](V2_DESIGN.md).
 
 ## Current status
 
-V2 is in **design/shadow-first** stage. Production actuation (worker restart/kill, automated receipt protocol, priority scheduling, multi-master routing) is deliberately deferred.
+**Shadow-first prototype. No production actuator is enabled.**
 
-## Layout
+This repository intentionally implements only the safe foundation:
+
+- task / worker / event models;
+- atomic durable task storage;
+- legal lifecycle validation;
+- lease/fencing validation helpers;
+- invariant checks (`farm doctor`);
+- read-only shadow observations (`farm shadow`);
+- cluster/project templates;
+- regression tests for the frozen invariants.
+
+It does **not** yet replace a production nudger/watcher, start or kill workers, mutate SLURM jobs, or add a receipt/ACK protocol to existing workers.
+
+## Design rule
+
+> Task state is durable; agents and sessions are disposable.
+
+The intended lifecycle is:
 
 ```text
-src/agent_farm_runtime/   core runtime and adapters
-roles/                    reusable worker role prompts
-examples/                 minimal project example
-templates/                cluster/project/task templates
-tests/                    regression tests for runtime invariants
-V2_DESIGN.md              frozen architecture contract
+READY → RUNNING ↔ WAITING → SUBMITTED → DONE
+                  │              │
+                  └→ BLOCKED     └→ RUNNING (revision)
+
+any → FAILED
 ```
+
+`WAITING` means there is a named normal-path unblock condition (`job:...`, `task:...`, `artifact:...`, `ruling:...`). `SUBMITTED` is reserved for the final acceptance handoff.
 
 ## Quick start
 
+Requires Python 3.11+ and no runtime third-party dependencies.
+
 ```bash
-python -m pip install -e .
-farm init .farm
-farm doctor .farm
-farm status .farm
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# initialize a project-local durable state directory
+cd /path/to/your/research-project
+farm init
+
+# inspect state and invariants
+farm status
+farm doctor
+
+# create a task contract
+farm task-create \
+  --objective "Task A objective" \
+  --deliverable "artifacts/task-a/result.md" \
+  --acceptance "Result is reproducible and passes registered checks"
+
+farm task-list
 ```
 
-See `V2_DESIGN.md` for the architecture and invariants.
+### Read-only shadow observation
+
+On a Linux cluster, shadow mode can inspect existing workspaces without modifying them:
+
+```bash
+farm shadow /path/to/existing/workspaces
+```
+
+It only uses explicit facts that already exist: process liveness, `.awaiting` contents, referenced artifacts, and SLURM status when available. It never uses file mtimes to infer control state.
+
+## Project-local layout
+
+`farm init` creates:
+
+```text
+.farm/
+├── tasks/       # authoritative task JSON
+├── workers/     # observed worker JSON
+├── events/      # append-only audit JSONL
+├── decisions/   # durable rulings/acceptance records (representation provisional)
+└── runtime/     # locks / local runtime metadata
+```
+
+Runtime code belongs here; scientific project context remains in the project repository.
+
+## Portability model
+
+```text
+agent-farm-runtime
+       │
+       ├── project A/.farm
+       ├── project B/.farm
+       └── project C/.farm
+```
+
+Cluster-specific behavior belongs behind adapters. The core task semantics should not know whether it is running on Harvard FASRC, Anvil, Delta, or another SLURM cluster.
+
+## What is deliberately deferred
+
+- production worker launching/restarting;
+- enforcement of leases against live workers;
+- structured receipt/ACK protocol;
+- automatic scientific acceptance;
+- priority scheduling;
+- multi-master routing;
+- event stream as a signal bus;
+- global event sequence/cursors;
+- generic backend plugin framework beyond thin adapters.
+
+These should be introduced only when shadow/canary evidence requires them.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The regression suite is intended to turn historical orchestration failures into permanent invariants.
+
+## License
+
+No license has been chosen yet. Add one intentionally before public distribution.
