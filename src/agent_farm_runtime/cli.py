@@ -84,7 +84,11 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     else:
         from .adapters.local_process import LocalProcessExecutor
         executor = LocalProcessExecutor(paths.runtime)
-    reconciler = Reconciler(paths, executor, grace_seconds=args.grace_seconds)
+    unblock = None
+    if args.auto_unblock:
+        from .observers import make_unblock
+        unblock = make_unblock(paths)
+    reconciler = Reconciler(paths, executor, grace_seconds=args.grace_seconds, unblock=unblock)
 
     def one_pass() -> None:
         rep = reconciler.reconcile_once()
@@ -174,6 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tmux-socket", default=None, help="dedicated tmux server socket (-L) for isolation")
     p.add_argument("--grace-seconds", type=float, default=60.0,
                    help="seconds a leased worker may be unobserved before its lease is rotated")
+    p.add_argument("--auto-unblock", dest="auto_unblock", action="store_true", default=True,
+                   help="resume WAITING tasks whose named job/artifact/task condition is met (default on)")
+    p.add_argument("--no-auto-unblock", dest="auto_unblock", action="store_false",
+                   help="do not auto-resume WAITING tasks (master resumes them)")
     p.add_argument("--loop", action="store_true", help="run continuously instead of one pass")
     p.add_argument("--interval", type=float, default=10.0, help="seconds between passes in --loop")
     p.set_defaults(func=cmd_reconcile)
