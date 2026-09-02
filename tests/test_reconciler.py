@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from agent_farm_runtime.adapters.local_process import LocalProcessExecutor
 from agent_farm_runtime.doctor import run_doctor
 from agent_farm_runtime.locking import ReconcilerBusy, single_reconciler
 from agent_farm_runtime.models import Receipt, ReceiptStatus, Task, TaskState
+from agent_farm_runtime.procutil import pid_identity_alive, proc_starttime
 from agent_farm_runtime.reconciler import Reconciler
 from agent_farm_runtime.store import FarmPaths, TaskStore
 from agent_farm_runtime.transitions import (
@@ -361,3 +363,79 @@ def test_single_reconciler_lock_is_exclusive(tmp_path):
     # released -> acquirable again
     with single_reconciler(rt):
         pass
+
+
+def _active_task(tid: str, ws: str) -> Task:
+    return Task(id=tid, objective="o", deliverable="d", acceptance="a",
+                state=TaskState.RUNNING, lease=Lease(f"W-{tid}", f"L-{tid}"),
+                metadata={"workspace": ws})
+
+
+def test_shared_workspace_among_active_tasks_is_rejected(tmp_path):
+    """Two concurrently-active tasks must never share a workspace (their workers
+    would corrupt each other's LEDGER/.session_id). doctor flags it FAIL."""
+    paths = _paths(tmp_path)
+    store = TaskStore(paths)
+    store.create(_active_task("A", "/lab/ws/shared"))
+    store.create(_active_task("B", "/lab/ws/shared"))
+    checks = run_doctor(paths)
+    assert any(c.level == "FAIL" and "shared" in c.message for c in checks)
+    # distinct workspaces are fine
+    store2 = TaskStore(_paths(tmp_path / "other"))
+    store2.create(_active_task("A", "/lab/ws/a"))
+    store2.create(_active_task("B", "/lab/ws/b"))
+    assert not any(c.level == "FAIL" for c in run_doctor(store2.paths))
+
+
+def test_new_ownership_committed_before_stale_worker_stopped(tmp_path):
+    """During adoption the NEW lease must be durably committed BEFORE the stale
+    generation is stopped, so a crash never orphans the task."""
+    paths = _paths(tmp_path)
+    store = TaskStore(paths)
+    store.create(_ready_task())
+    order: list[tuple[str, str]] = []
+
+    class OrderExecutor(FakeExecutor):
+        def stop(self, worker_id):
+            t = store.get("T-1")  # what is durably committed at stop time?
+            order.append(("stop", t.lease.lease_id if t.lease else None))
+            super().stop(worker_id)
+
+        def launch(self, task, lease):
+            order.append(("launch", lease.lease_id))
+            return super().launch(task, lease)
+
+    ex = OrderExecutor()
+    rec = Reconciler(paths, ex, grace_seconds=0)
+    rec.reconcile_once()                      # start gen1
+    first = store.get("T-1").lease
+    ex.kill(first.worker_id)
+    rec.reconcile_once()                      # adopt: commit new -> stop old -> launch new
+
+    stops = [o for o in order if o[0] == "stop"]
+    assert stops, "adoption must stop the stale generation"
+    # the lease committed at stop time is the NEW one, not the dead generation's
+    assert stops[-1][1] == store.get("T-1").lease.lease_id
+    assert stops[-1][1] != first.lease_id
+
+
+def test_pid_identity_rejects_recycled_pid(tmp_path):
+    me = os.getpid()
+    st = proc_starttime(me)
+    assert st is not None
+    assert pid_identity_alive(me, st) is True
+    assert pid_identity_alive(me, st + 987654) is False   # same pid, different process
+    assert pid_identity_alive(2147480000, None) is False  # nonexistent pid
+
+
+def test_local_process_worker_is_reaped_not_zombied(tmp_path):
+    paths = _paths(tmp_path)
+    ex = LocalProcessExecutor(paths.runtime)
+    ex.launch(_ready_task(command="true"), Lease("W-z", "L-z"))  # exits immediately
+    assert _wait(lambda: ex.poll("W-z").alive is False), "worker never exited"
+    pid, _ = ex._identity("W-z")
+    # poll()/stop() reap children, so the exited worker is gone, not a zombie
+    if pid is not None and os.path.exists(f"/proc/{pid}"):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        state = stat[stat.rindex(")") + 2]
+        assert state != "Z", "exited worker left as a zombie"

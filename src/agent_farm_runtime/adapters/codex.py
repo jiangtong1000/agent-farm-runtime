@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import Lease, Receipt, Task
+from ..procutil import pid_identity_alive, read_pidfile
 from .base import LaunchHandle, WorkerObservation
 
 # --- the receipt protocol the codex agent must honor ------------------------
@@ -77,8 +78,6 @@ class CodexClusterConfig:
     # shell line(s) to prepare PATH inside the tmux window (e.g. an nvm export);
     # empty means "codex is already on the login shell PATH".
     path_prelude: str = ""
-    # directory (a shell expression is allowed) where codex writes rollout-*.jsonl
-    sessions_dir: str = "$HOME/.codex/sessions/$(date +%Y/%m/%d)"
     session_id_capture_delay: int = 45
 
     @classmethod
@@ -87,7 +86,6 @@ class CodexClusterConfig:
         return cls(
             codex_cmd=os.environ.get("FARM_CODEX_CMD", d.codex_cmd),
             path_prelude=os.environ.get("FARM_CODEX_PATH_PRELUDE", d.path_prelude),
-            sessions_dir=os.environ.get("FARM_CODEX_SESSIONS_DIR", d.sessions_dir),
             session_id_capture_delay=int(
                 os.environ.get("FARM_CODEX_SID_DELAY", d.session_id_capture_delay)
             ),
@@ -115,25 +113,35 @@ def _prelude(cfg: CodexClusterConfig) -> str:
 def render_launch_script(
     *, cfg: CodexClusterConfig, workspace: str, worker_id: str, task_id: str,
     lease_id: str, receipt_path: str, brief: str, log_name: str, sid_path: str,
+    pid_file: str,
 ) -> str:
     """Headless-codex launch mirroring the proven RESTART_HEADLESS.sh, plus the
-    runtime env + receipt protocol. Session-id capture diffs the rollout set
-    against a pre-launch snapshot (rather than blindly taking the newest file),
-    which is robust to pre-existing rollouts; concurrent starts within the
-    capture window remain ambiguous and are serialized by the reconciler."""
+    runtime env + receipt protocol.
+
+    Worker identity: codex is started in the background so its exact pid is known;
+    the pid and its /proc start-time are written to `pid_file` as a stable
+    (pid,starttime) identity (liveness is per-worker, never a workspace-wide
+    pgrep). Session-id capture greps the session id codex prints at startup into
+    THIS worker's own (per-worker) log -- race-free even when several codex
+    workers start concurrently, and with no dependence on the shared sessions dir.
+    """
     full_brief = brief.rstrip() + "\n\n" + receipt_instruction(receipt_path)
-    sd = cfg.sessions_dir
+    delay = cfg.session_id_capture_delay
     return f"""#!/bin/bash
 cd {shlex.quote(workspace)}
 {_prelude(cfg)}{_env_exports(worker_id, task_id, lease_id, receipt_path)}
 rm -f {shlex.quote(receipt_path)}
-# capture the NEW codex session id (rollout that appears after launch)
-_PRE=$(mktemp); ls -1 {sd}/rollout-*.jsonl 2>/dev/null > "$_PRE" || true
-( sleep {cfg.session_id_capture_delay}; \
-  f=$(ls -t {sd}/rollout-*.jsonl 2>/dev/null | grep -vxF -f "$_PRE" | head -1); \
-  [ -n "$f" ] && echo "$f" | grep -oE '[0-9a-f-]{{36}}' > {shlex.quote(sid_path)}; \
-  rm -f "$_PRE" ) &
-{cfg.codex_cmd} {shlex.quote(full_brief)} 2>&1 | tee {shlex.quote(log_name)}
+{cfg.codex_cmd} {shlex.quote(full_brief)} > >(tee {shlex.quote(log_name)}) 2>&1 &
+_CPID=$!
+_ST=$(awk '{{s=substr($0,index($0,") ")+2); n=split(s,a," "); print a[20]}}' /proc/$_CPID/stat 2>/dev/null)
+echo "$_CPID $_ST" > {shlex.quote(pid_file)}
+# race-free session id: codex prints it into THIS worker's own log at startup
+( for _ in $(seq 1 {delay}); do
+    sid=$(grep -oiE 'session id: [0-9a-f-]{{36}}' {shlex.quote(log_name)} 2>/dev/null | grep -oE '[0-9a-f-]{{36}}' | head -1)
+    [ -n "$sid" ] && {{ echo "$sid" > {shlex.quote(sid_path)}; break; }}
+    sleep 1
+  done ) &
+wait $_CPID
 """
 
 
@@ -155,24 +163,20 @@ if [ -z "$SID" ]; then echo "no session id at {sid_path}; cannot resume" >&2; ex
 
 # --- liveness (default; injectable) -----------------------------------------
 
-def _default_is_alive(workspace: str) -> bool:
-    """Live iff a codex process has this workspace as cwd (the farm's own test).
+def _default_codex_alive(state: dict) -> bool:
+    """Per-worker liveness: is the SPECIFIC codex process we launched still the
+    live process at its recorded (pid, starttime)?
 
-    NOTE: this is a best-effort signal; the reconciler's grace policy — not this
-    function — is what protects a live worker from a transient miss."""
-    try:
-        pids = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "codex"],
-                              capture_output=True, text=True).stdout.split()
-    except FileNotFoundError:
+    This deliberately does NOT scan for any codex whose cwd matches the workspace:
+    a workspace-level pgrep cannot tell two workers (e.g. a dead prior generation
+    and its live successor) apart in the same workspace. Identity is the launched
+    pid plus its /proc start-time, so a recycled pid is not mistaken for a worker.
+    """
+    pid_file = state.get("pid_file")
+    if not pid_file:
         return False
-    target = str(Path(workspace).resolve())
-    for pid in pids:
-        try:
-            if str(Path(f"/proc/{pid}/cwd").resolve()) == target:
-                return True
-        except (OSError, RuntimeError):
-            continue
-    return False
+    pid, start = read_pidfile(pid_file)
+    return pid_identity_alive(pid, start)
 
 
 def _default_run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -209,7 +213,7 @@ class CodexTmuxExecutor:
         tmux_socket: str | None = None,
         config: CodexClusterConfig | None = None,
         run: Callable[[list[str]], subprocess.CompletedProcess] = _default_run,
-        is_alive: Callable[[str], bool] = _default_is_alive,
+        is_alive: Callable[[dict], bool] = _default_codex_alive,
     ):
         self.session = session
         self.tmux_socket = tmux_socket
@@ -266,12 +270,14 @@ class CodexTmuxExecutor:
         window = task.metadata.get("agent_label") or wid
         workspace = str(Path(ws).resolve())
 
-        # idempotent per lease: never start a second codex for a live worker
+        # idempotent per lease: never start a second codex for THIS live worker
+        # (judged by this worker's own pid identity, not any codex in the workspace)
         st = self._load_state(wid)
-        if st is not None and self.is_alive(workspace):
+        if st is not None and self.is_alive(st):
             return LaunchHandle(worker_id=wid, session_handle=f"{self.session}:{window}")
 
         receipt_path = str(self._receipt_path(wid))
+        pid_file = str(self.state_dir / f"{wid}.pid")
         sid_path = str(Path(workspace) / f".session_id_{wid}")
         log_name = f"agent_{window}_{wid}.log"
         launch_sh = Path(workspace) / f".farm_launch_{wid}.sh"
@@ -280,13 +286,13 @@ class CodexTmuxExecutor:
         launch_sh.write_text(render_launch_script(
             cfg=self.config, workspace=workspace, worker_id=wid, task_id=task.id,
             lease_id=lease.lease_id, receipt_path=receipt_path, brief=brief,
-            log_name=log_name, sid_path=sid_path,
+            log_name=log_name, sid_path=sid_path, pid_file=pid_file,
         ))
         launch_sh.chmod(0o755)
         self._save_state(wid, {
             "workspace": workspace, "window": window, "receipt_path": receipt_path,
             "sid_path": sid_path, "log_name": log_name, "task_id": task.id,
-            "lease_id": lease.lease_id,
+            "lease_id": lease.lease_id, "pid_file": pid_file,
         })
         self._ensure_window(window, workspace)
         self._send(window, f"bash {shlex.quote(str(launch_sh))}")
@@ -321,7 +327,7 @@ class CodexTmuxExecutor:
                 receipt = Receipt.from_dict(json.loads(rp.read_text()))
             except (ValueError, KeyError):
                 receipt = None
-        return WorkerObservation(worker_id=worker_id, alive=self.is_alive(st["workspace"]), receipt=receipt)
+        return WorkerObservation(worker_id=worker_id, alive=self.is_alive(st), receipt=receipt)
 
     def stop(self, worker_id: str) -> None:
         """Interrupt codex in the worker's window; leaves the window intact."""

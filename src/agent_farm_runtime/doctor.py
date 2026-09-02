@@ -21,8 +21,21 @@ def run_doctor(paths: FarmPaths) -> list[Check]:
 
     lease_ids: set[str] = set()
     worker_to_task: dict[str, str] = {}
+    active_workspace: dict[str, str] = {}
 
     for task in tasks:
+        # A workspace is one agent's mutable state (LEDGER, .session_id, MASTER
+        # notes); two concurrently-active tasks must never share one, or their
+        # workers would corrupt each other. Forbid it as a hard invariant.
+        if task.state in {TaskState.RUNNING, TaskState.WAITING}:
+            ws = task.metadata.get("workspace")
+            if ws:
+                if ws in active_workspace:
+                    checks.append(Check("FAIL", f"workspace {ws} shared by active tasks "
+                                                 f"{active_workspace[ws]} and {task.id}"))
+                else:
+                    active_workspace[ws] = task.id
+
         if task.lease:
             if task.lease.lease_id in lease_ids:
                 checks.append(Check("FAIL", f"duplicate lease id {task.lease.lease_id}"))

@@ -142,10 +142,14 @@ class Reconciler:
         payload = {"worker_id": worker_id, "lease_id": lease.lease_id}
         if adopting_from:
             payload["dead_worker_id"] = adopting_from
+        # 1. commit the NEW authoritative ownership FIRST, so a crash never leaves
+        #    the stale generation retired with no durable successor recorded;
+        self._commit(leased, event, payload)
+        # 2. only then retire the stale generation (fenced already by the new lease);
         if adopting_from:
             self.executor.stop(adopting_from)
-        self._commit(leased, event, payload)        # PERSIST desired state FIRST
-        handle = self.executor.launch(leased, lease)  # THEN actuate (idempotent per lease)
+        # 3. then actuate the new worker (idempotent per lease).
+        handle = self.executor.launch(leased, lease)
         self._observe(worker_id, handle.session_handle, task.id, lease.lease_id, alive=True)
         getattr(report, key).append(task.id)
 

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
-from agent_farm_runtime.adapters.codex import CodexTmuxExecutor
+from agent_farm_runtime.adapters.codex import (
+    CodexClusterConfig,
+    CodexTmuxExecutor,
+    render_launch_script,
+)
 from agent_farm_runtime.doctor import run_doctor
 from agent_farm_runtime.models import Lease, Receipt, ReceiptStatus, Task, TaskState
+from agent_farm_runtime.procutil import proc_starttime
 from agent_farm_runtime.reconciler import Reconciler
 from agent_farm_runtime.store import FarmPaths, TaskStore
 
@@ -182,3 +189,40 @@ def test_resume_and_stop_never_do_window_surgery(tmp_path):
     # the crash-lesson invariant: the executor never kills or moves windows
     for c in rec.calls:
         assert "kill-window" not in c and "kill-session" not in c and "move-window" not in c
+
+
+# --- PR review fix: worker-specific liveness (not workspace-level pgrep) -----
+
+
+def test_two_workers_in_one_workspace_are_never_confused(tmp_path):
+    """The named regression: two workers sharing a workspace must be judged
+    independently by per-worker pid identity, not by any codex whose cwd matches
+    the workspace (which cannot tell them apart)."""
+    rt = tmp_path / "rt"; rt.mkdir()
+    ws = tmp_path / "ws"; ws.mkdir()
+    ex = CodexTmuxExecutor(rt, run=TmuxRecorder())  # DEFAULT pid-identity liveness
+    ex.launch(_task(ws, tid="T-a", label="A"), Lease("W-A", "LA"))
+    ex.launch(_task(ws, tid="T-b", label="B"), Lease("W-B", "LB"))
+    # same workspace, two workers: A is alive (this process), B is dead
+    (rt / "codex_workers" / "W-A.pid").write_text(f"{os.getpid()} {proc_starttime(os.getpid())}")
+    (rt / "codex_workers" / "W-B.pid").write_text("2147480000 1")  # nonexistent pid
+    assert ex.poll("W-A").alive is True
+    assert ex.poll("W-B").alive is False   # not fooled by A being live in the same ws
+
+
+def test_launch_records_pid_identity_and_scopes_session_id_to_that_pid(tmp_path):
+    s = render_launch_script(
+        cfg=CodexClusterConfig(), workspace="/ws", worker_id="W1", task_id="T1",
+        lease_id="L1", receipt_path="/r.json", brief="b", log_name="l.log",
+        sid_path="/ws/.sid", pid_file="/rt/W1.pid",
+    )
+    assert "$_CPID $_ST" in s               # (pid, starttime) identity recorded
+    assert "session id:" in s               # session id from THIS worker's own log
+    assert "l.log" in s                     # ...which is this worker's per-worker log
+    assert "ls -t" not in s                 # no race-prone "newest rollout" heuristic
+    assert "/proc/$_CPID/fd" not in s       # not the (unreliable) open-fd approach
+    if shutil.which("bash"):
+        p = Path("/tmp/_farm_codex_render_check.sh")
+        p.write_text(s)
+        assert subprocess.run(["bash", "-n", str(p)]).returncode == 0
+        p.unlink()

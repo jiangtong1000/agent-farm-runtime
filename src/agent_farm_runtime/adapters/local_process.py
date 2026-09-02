@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from ..models import Lease, Receipt, Task
+from ..procutil import pid_identity_alive, proc_starttime, read_pidfile, reap_children
 from .base import LaunchHandle, WorkerObservation
 
 
@@ -15,14 +16,13 @@ class LocalProcessExecutor:
 
     This is the first NON-fake executor: it proves the reconciler can launch,
     observe, fence, and adopt an actual process — without depending on codex or
-    tmux. It is the honest stepping stone to CodexTmuxExecutor (which specializes
-    launch/resume to a tmux window running `codex exec`).
+    tmux. It is the honest stepping stone to CodexTmuxExecutor.
 
-    A worker is a subprocess running `task.metadata["command"]` (a shell string).
-    The command is handed, via env, everything it needs to write a fenced
-    receipt: FARM_RECEIPT_PATH, FARM_WORKER_ID, FARM_TASK_ID, FARM_LEASE_ID.
-    A cooperative worker writes its receipt there; the executor reads it back and
-    checks liveness by pid. Receipts live under <runtime>/receipts/<worker>.json.
+    A worker is a subprocess running `task.metadata["command"]` (a shell string),
+    handed via env everything it needs to write a fenced receipt: FARM_RECEIPT_PATH,
+    FARM_WORKER_ID, FARM_TASK_ID, FARM_LEASE_ID. Liveness uses a (pid, starttime)
+    identity file, so a recycled pid is never mistaken for a live worker, and
+    exited children are reaped so a `--loop` reconciler does not leak zombies.
     """
 
     def __init__(self, runtime_dir: Path):
@@ -37,36 +37,24 @@ class LocalProcessExecutor:
     def _pid_path(self, worker_id: str) -> Path:
         return self.procs_dir / f"{worker_id}.pid"
 
-    def _read_pid(self, worker_id: str) -> int | None:
+    def _identity(self, worker_id: str) -> tuple[int | None, int | None]:
         p = self._pid_path(worker_id)
-        if not p.exists():
-            return None
-        try:
-            return int(p.read_text().strip())
-        except ValueError:
-            return None
+        return read_pidfile(str(p)) if p.exists() else (None, None)
 
-    def _pid_alive(self, worker_id: str) -> bool:
-        pid = self._read_pid(worker_id)
-        if pid is None:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+    def _alive(self, worker_id: str) -> bool:
+        reap_children()  # clear zombies before judging liveness
+        pid, start = self._identity(worker_id)
+        return pid_identity_alive(pid, start)
 
     def launch(self, task: Task, lease: Lease) -> LaunchHandle:
         wid = lease.worker_id
-        # idempotent for a given lease: if this worker is already running, do not
-        # start a second process (crash-consistency defense-in-depth).
-        if self._pid_alive(wid):
-            return LaunchHandle(worker_id=wid, session_handle=f"pid:{self._read_pid(wid)}")
+        # idempotent for a given lease: if THIS worker (pid+starttime) is already
+        # running, do not start a second process.
+        if self._alive(wid):
+            pid, _ = self._identity(wid)
+            return LaunchHandle(worker_id=wid, session_handle=f"pid:{pid}")
         receipt_path = self._receipt_path(wid)
-        # fresh generation: do not inherit a stale receipt file
-        receipt_path.unlink(missing_ok=True)
+        receipt_path.unlink(missing_ok=True)  # fresh generation: no stale receipt
         env = dict(os.environ)
         env.update(
             FARM_RECEIPT_PATH=str(receipt_path),
@@ -78,18 +66,16 @@ class LocalProcessExecutor:
         if not command:
             raise ValueError(f"task {task.id} has no metadata.command for LocalProcessExecutor")
         proc = subprocess.Popen(
-            command,
-            shell=True,
-            env=env,
-            cwd=task.metadata.get("cwd") or None,
-            start_new_session=True,
+            command, shell=True, env=env,
+            cwd=task.metadata.get("cwd") or None, start_new_session=True,
         )
-        self._pid_path(wid).write_text(str(proc.pid))
+        # record a stable identity: pid + start-time, so pid reuse cannot alias it
+        self._pid_path(wid).write_text(f"{proc.pid} {proc_starttime(proc.pid)}")
         return LaunchHandle(worker_id=wid, session_handle=f"pid:{proc.pid}")
 
     def resume(self, task: Task, worker_id: str, lease: Lease) -> None:
-        # Local processes are not re-woken; a WAITING->RUNNING resume for a
-        # crashed local worker is handled by adoption (relaunch) instead.
+        # Local processes are not re-woken; a crashed local worker is re-actuated
+        # by adoption (relaunch) instead.
         return None
 
     def poll(self, worker_id: str) -> WorkerObservation:
@@ -100,23 +86,15 @@ class LocalProcessExecutor:
                 receipt = Receipt.from_dict(json.loads(rp.read_text()))
             except (ValueError, KeyError):
                 receipt = None
-        pid = self._read_pid(worker_id)
-        alive = False
-        if pid is not None:
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except ProcessLookupError:
-                alive = False
-            except PermissionError:
-                alive = True
-        return WorkerObservation(worker_id=worker_id, alive=alive, receipt=receipt)
+        return WorkerObservation(worker_id=worker_id, alive=self._alive(worker_id), receipt=receipt)
 
     def stop(self, worker_id: str) -> None:
-        pid = self._read_pid(worker_id)
-        if pid is None:
+        pid, start = self._identity(worker_id)
+        if not pid_identity_alive(pid, start):  # only signal the process we launched
+            reap_children()
             return
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
+        reap_children()
