@@ -1,0 +1,6 @@
+# Provisional cluster profile. Core semantics must remain cluster-agnostic.
+name = "example-slurm-cluster"
+scheduler = "slurm"
+workspace_root = "/path/to/workspaces"
+scratch_root = "/path/to/scratch"
+worker_backend = "codex"
