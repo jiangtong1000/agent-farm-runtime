@@ -15,9 +15,9 @@ The design is derived from real failure modes in a live SSH/tmux/SLURM agent far
 
 ## Current status
 
-**Shadow-first prototype. No production actuator is enabled.**
+**Minimal actuator landed (canary stage). Codex/tmux backend still pending.**
 
-This repository intentionally implements only the safe foundation:
+Safe foundation (unchanged):
 
 - task / worker / event models;
 - atomic durable task storage;
@@ -28,7 +28,27 @@ This repository intentionally implements only the safe foundation:
 - cluster/project templates;
 - regression tests for the frozen invariants.
 
-It does **not** yet replace a production nudger/watcher, start or kill workers, mutate SLURM jobs, or add a receipt/ACK protocol to existing workers.
+Actuation (new — the control loop that drives disposable workers):
+
+- `Reconciler.reconcile_once` — one serialized, idempotent pass (INV-6) that
+  actuates `READY` tasks, applies fenced worker receipts, adopts crashed
+  workers, resumes unblocked `WAITING` tasks, and repairs the observed registry;
+- structured **receipt** primitive (`RUNNING`/`AWAITING`/`SUBMITTED`/`FAILED`),
+  fenced by `lease_id` so a superseded worker generation cannot advance a task;
+- **lease rotation** (`rotate_lease`) — releases a lease from a *proven-dead*
+  holder so the task can be re-actuated with state preserved. This is the
+  "adopt a stopped task" primitive and is a **design delta beyond frozen v0.2**
+  (state graph froze before actuation), pending ratification into v0.3;
+- `WorkerExecutor` backends: `FakeExecutor` (tests) and `LocalProcessExecutor`
+  (drives real OS subprocesses — the honest bridge before a codex/tmux backend);
+- `farm reconcile [--loop]` CLI.
+
+A worker never drives `DONE`: `DONE` still requires recorded acceptance, which
+is a master/harness judgment (Layer-1/Layer-2 boundary).
+
+Still deferred: the **codex/tmux executor backend** (real farm workers), SLURM
+job mutation, WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:`),
+and enforcement against live (non-cooperative) workers.
 
 ## Design rule
 
@@ -111,17 +131,34 @@ Cluster-specific behavior belongs behind adapters. The core task semantics shoul
 
 ## What is deliberately deferred
 
-- production worker launching/restarting;
-- enforcement of leases against live workers;
-- structured receipt/ACK protocol;
-- automatic scientific acceptance;
+- codex/tmux executor backend (real farm workers; `LocalProcessExecutor` is the
+  current real backend and the pattern to specialize);
+- enforcement of leases against live *non-cooperative* workers (fencing today
+  assumes workers echo their `lease_id`);
+- WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:` predicates);
+- SLURM job submission/cancellation;
+- automatic scientific acceptance (DONE stays a master/harness judgment);
 - priority scheduling;
 - multi-master routing;
 - event stream as a signal bus;
-- global event sequence/cursors;
-- generic backend plugin framework beyond thin adapters.
+- global event sequence/cursors.
 
 These should be introduced only when shadow/canary evidence requires them.
+
+## Actuation quick start
+
+```bash
+farm --project P init
+farm --project P task-create --id T-1 \
+  --objective "..." --deliverable "..." --acceptance "..." \
+  --command "python my_worker.py"     # worker echoes FARM_LEASE_ID in its receipt
+farm --project P reconcile            # one pass: launch -> observe -> advance
+farm --project P doctor               # invariant check
+```
+
+The worker reads `FARM_RECEIPT_PATH`, `FARM_WORKER_ID`, `FARM_TASK_ID`,
+`FARM_LEASE_ID` from its environment and writes a JSON `Receipt` to
+`FARM_RECEIPT_PATH` when it reaches a wait boundary, submits, or fails.
 
 ## Tests
 

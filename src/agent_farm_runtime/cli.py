@@ -42,10 +42,51 @@ def cmd_task_create(args: argparse.Namespace) -> int:
     paths = FarmPaths(farm_root(Path(args.project)))
     paths.ensure()
     task_id = args.id or f"T-{uuid.uuid4().hex[:8]}"
-    task = Task(id=task_id, objective=args.objective, deliverable=args.deliverable, acceptance=args.acceptance)
+    metadata: dict = {}
+    if args.command:
+        metadata["command"] = args.command
+    if args.cwd:
+        metadata["cwd"] = args.cwd
+    task = Task(
+        id=task_id,
+        objective=args.objective,
+        deliverable=args.deliverable,
+        acceptance=args.acceptance,
+        metadata=metadata,
+    )
     TaskStore(paths).create(task)
     print(task_id)
     return 0
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    import time
+
+    from .adapters.local_process import LocalProcessExecutor
+    from .reconciler import Reconciler
+
+    paths = FarmPaths(farm_root(Path(args.project)))
+    paths.ensure()
+    executor = LocalProcessExecutor(paths.runtime)
+    reconciler = Reconciler(paths, executor)
+
+    def one_pass() -> None:
+        rep = reconciler.reconcile_once()
+        print(json.dumps({
+            "launched": rep.launched,
+            "adopted": rep.adopted,
+            "advanced": rep.advanced,
+            "resumed": rep.resumed,
+            "heartbeats": rep.heartbeats,
+            "ignored_stale": rep.ignored_stale,
+        }, sort_keys=True))
+
+    if not args.loop:
+        one_pass()
+        return 0
+    while True:
+        one_pass()
+        time.sleep(args.interval)
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -89,6 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--objective", required=True)
     p.add_argument("--deliverable", required=True)
     p.add_argument("--acceptance", required=True)
+    p.add_argument("--command", help="worker command (metadata.command) for the local-process executor")
+    p.add_argument("--cwd", help="working directory for the worker command")
     p.set_defaults(func=cmd_task_create)
     p = sub.add_parser("task-list", help="list task contracts")
     p.set_defaults(func=cmd_task_list)
@@ -97,6 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("shadow", help="read-only shadow observation of existing workspaces")
     p.add_argument("workspaces")
     p.set_defaults(func=cmd_shadow)
+    p = sub.add_parser("reconcile", help="run the actuating control loop (local-process executor)")
+    p.add_argument("--loop", action="store_true", help="run continuously instead of one pass")
+    p.add_argument("--interval", type=float, default=10.0, help="seconds between passes in --loop")
+    p.set_defaults(func=cmd_reconcile)
     return parser
 
 
