@@ -47,6 +47,15 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         metadata["command"] = args.command
     if args.cwd:
         metadata["cwd"] = args.cwd
+    if args.workspace:
+        metadata["workspace"] = args.workspace
+    brief = args.brief
+    if args.brief_file:
+        brief = Path(args.brief_file).read_text()
+    if brief:
+        metadata["brief"] = brief
+    if args.agent_label:
+        metadata["agent_label"] = args.agent_label
     task = Task(
         id=task_id,
         objective=args.objective,
@@ -138,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--acceptance", required=True)
     p.add_argument("--command", help="worker command (metadata.command) for the local-process executor")
     p.add_argument("--cwd", help="working directory for the worker command")
+    p.add_argument("--workspace", help="abs workspace dir (metadata.workspace) for the codex-tmux executor")
+    p.add_argument("--brief", help="agent-facing brief (metadata.brief) for the codex-tmux executor")
+    p.add_argument("--brief-file", help="read the agent brief from this file")
+    p.add_argument("--agent-label", help="tmux window name for the codex-tmux worker")
     p.set_defaults(func=cmd_task_create)
     p = sub.add_parser("task-list", help="list task contracts")
     p.set_defaults(func=cmd_task_list)
