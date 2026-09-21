@@ -202,13 +202,17 @@ startup script alone does not enable it. `FARM_ACTUATION_ALLOWED=1` is supplied 
 the Master under the owner's authorization, not something the owner must type.
 
 For Slurm node turnover, the Master can publish its separate human-facing tmux
-endpoint under a stable target such as `delta/primary`. The access layer keeps
+endpoint under a farm-specific target such as `cluster/study-a`. Each target is
+permanently bound to one farm/root; other farms use different targets. The access layer keeps
 immutable records on shared storage and requires exact deployment, epoch, job
 and tmux identity checks. `access resolve` returns a candidate; `access verify`
 on the recorded host returns attachment arguments only when all checks pass.
 See the [access protocol and runbook](docs/ACCESS_PROTOCOL.md). A local connection
 client and terminal UI are separate work; these commands do not attach or start
 sessions.
+The deployment records the runtime hostname and exact Slurm node separately,
+using launcher identity captured at reconciler startup. A movable local shorthand
+belongs to the future connection client, not the remote registry.
 
 ## Inspect, review and continue
 

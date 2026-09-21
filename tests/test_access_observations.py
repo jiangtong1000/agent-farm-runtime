@@ -21,11 +21,16 @@ def fails(state, call, reason=None):
         assert caught.value.reason == reason
 
 
-def test_slurm_requests_only_the_exact_allocation_and_expands_its_nodes():
+def test_slurm_requests_only_the_exact_allocation_and_expands_its_nodes(monkeypatch):
+    monkeypatch.setenv("SLURM_CLUSTERS", "another-cluster")
+    monkeypatch.setenv("SLURM_TIME_FORMAT", "relative")
+    monkeypatch.setenv("TZ", "Etc/GMT+5")
     calls = []
     def run(argv, **kwargs):
         calls.append(argv)
         assert kwargs["timeout"] == 10 and kwargs["env"]["LC_ALL"] == "C"
+        assert kwargs["env"]["SLURM_TIME_FORMAT"] == "standard" and kwargs["env"]["TZ"] == "UTC"
+        assert "SLURM_CLUSTERS" not in kwargs["env"]
         if "job" in argv:
             out = "JobId=123 JobName=irrelevant JobState=RUNNING UserId=example(1001) NodeList=node-[1-2] StartTime=2026-01-01T00:00:00\n"
         else:
@@ -90,18 +95,19 @@ def test_wrong_socket_owner_fails_before_any_tmux_call(control_socket, monkeypat
     fails("AUTH_REQUIRED", lambda: obs.control(str(control_socket), "master", None), "socket_owner")
 
 
-def tmux_stub(monkeypatch, *, session="master", windows="@1\t0\tmain\n@2\t1\tlogs\n"):
+def tmux_stub(monkeypatch, *, session="master", windows="@1|0|main\n@2|1|logs\n"):
     calls = []
     monkeypatch.setattr("agent_farm_runtime.access.observations.proc_starttime", lambda _: 42)
     monkeypatch.setattr("agent_farm_runtime.access.observations.host_identity", lambda: {"boot_id": "boot-a"})
     def run(argv, **kwargs):
         calls.append(argv)
-        assert argv[:3] == ["tmux", "-N", "-S"] and "TMUX" not in kwargs["env"]
+        assert argv[:2] == ["tmux", "-S"] and "TMUX" not in kwargs["env"]
+        assert "-N" not in argv
         assert kwargs["timeout"] == 10
-        if argv[4] == "display-message":
-            out = f"$7\t{session}\t321\n"
+        if argv[3] == "display-message":
+            out = f"$7|{session}|321\n"
         else:
-            assert argv[4] == "list-windows"
+            assert argv[3] == "list-windows"
             out = windows
         return subprocess.CompletedProcess(argv, 0, out, "")
     return Observations(run=run), calls
@@ -113,8 +119,8 @@ def test_tmux_uses_explicit_socket_exact_name_and_window_id(control_socket, monk
     result = obs.control(str(control_socket), "master", "main")
     assert result["session_id"] == "$7" and result["window_id"] == "@1"
     assert result["socket_inode"] == control_socket.stat().st_ino
-    assert calls[0][4:9] == ["display-message", "-p", "-t", "=master:", "#{session_id}\t#{session_name}\t#{pid}"]
-    assert calls[1][4:7] == ["list-windows", "-t", "$7"]
+    assert calls[0][3:8] == ["display-message", "-p", "-t", "=master:", "#{session_id}|#{session_name}|#{pid}"]
+    assert calls[1][3:6] == ["list-windows", "-t", "$7"]
 
 
 def test_default_socket_ignores_ambient_worker_server(monkeypatch):
@@ -125,24 +131,34 @@ def test_default_socket_ignores_ambient_worker_server(monkeypatch):
 
 @pytest.mark.parametrize("window,state", [("ma", "SESSION_MISSING"), ("missing", "SESSION_MISSING"), ("main", "CONFLICT")])
 def test_window_names_are_exact_and_duplicates_fail(control_socket, monkeypatch, window, state):
-    obs, _ = tmux_stub(monkeypatch, windows="@1\t0\tmain\n@2\t1\tmain\n")
+    obs, _ = tmux_stub(monkeypatch, windows="@1|0|main\n@2|1|main\n")
     fails(state, lambda: obs.control(str(control_socket), "master", window))
 
 
-def test_prefix_session_result_is_rejected(control_socket, monkeypatch):
-    obs, _ = tmux_stub(monkeypatch, session="master-other")
+@pytest.mark.parametrize("session", ["master-other", "masters", "mas"])
+def test_prefix_session_result_is_rejected(control_socket, monkeypatch, session):
+    obs, calls = tmux_stub(monkeypatch, session=session)
     fails("CONFLICT", lambda: obs.control(str(control_socket), "master", None))
+    assert len(calls) == 1 and "=master:" in calls[0]
 
 
 @pytest.mark.parametrize("stderr,state", [("can't find session: master", "SESSION_MISSING"),
-    ("permission denied", "AUTH_REQUIRED"), ("server exited unexpectedly", "UNREACHABLE"), ("", "UNREACHABLE")])
+    ("can't find session master", "SESSION_MISSING"),
+    ("no such session: $7", "SESSION_MISSING"),
+    ("can't find window: main", "SESSION_MISSING"), ("can't find window main", "SESSION_MISSING"),
+    ("permission denied", "AUTH_REQUIRED"), ("access denied", "AUTH_REQUIRED"),
+    ("operation not permitted", "AUTH_REQUIRED"),
+    ("can't find session master\npermission denied", "AUTH_REQUIRED"),
+    ("can't find session master\nserver exited unexpectedly", "UNREACHABLE"),
+    ("server exited unexpectedly", "UNREACHABLE"), ("no server running on /private/socket", "UNREACHABLE"),
+    ("error connecting to /private/socket (Connection refused)", "UNREACHABLE"), ("", "UNREACHABLE")])
 def test_failed_tmux_observation_never_becomes_a_create_request(control_socket, stderr, state):
     calls = []
     def run(argv, **kw):
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 1, "", stderr)
     fails(state, lambda: Observations(run=run).control(str(control_socket), "master", None))
-    assert len(calls) == 1 and calls[0][4] == "display-message"
+    assert len(calls) == 1 and calls[0][3] == "display-message"
 
 
 @pytest.mark.parametrize("root", ["/tmp/farm-access", "/dev/shm/farm-access", "/run/farm-access", "/var/tmp/farm-access", "relative"])

@@ -236,5 +236,6 @@ def claim_farm(paths: FarmPaths, *, request_id: str, actor: str) -> dict:
         claimed = {**control, "phase": "claimed", "claimed_by": actor}
         _publish(paths, {**manifest, **current, "pid": None, "pid_namespace": None,
                          "started_at": None, "loop": False, "execution_epoch": request_id,
+                         "scheduler_attestation": None,
                          "writer_policy": "pinned-host", "handoff": claimed}, "FARM_CLAIMED", actor)
         return claimed

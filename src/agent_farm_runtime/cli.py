@@ -334,6 +334,15 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                 if previous.get("handoff") and any(previous.get(k) != getattr(args, k)
                                                    for k in ("executor", "session", "tmux_socket")):
                     raise StoreError("handoff requires unchanged executor/session/socket configuration")
+                from .access.allocation import capture_allocation
+                from .access.contract import AccessError
+                current = runtime_identity()
+                epoch = execution_epoch(previous)
+                try:
+                    scheduler_attestation = capture_allocation(
+                        previous, current, epoch, job_id=args.slurm_job_id, node=args.slurm_node)
+                except AccessError as exc:
+                    raise StoreError(f"{exc.state}: {exc}") from exc
                 executor = _executor(paths, args.executor, args.session, args.tmux_socket)
                 unblock = None
                 observed_this_pass: dict[str, str | None] = {}
@@ -350,8 +359,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                                         max_auto_restarts=args.max_auto_restarts)
                 from .procutil import proc_starttime
                 started_deployment = {
-                    **previous, **runtime_identity(), "started_at": datetime.now(timezone.utc).isoformat(),
-                    **farm_identity(str(paths.root.resolve())), "execution_epoch": execution_epoch(previous),
+                    **previous, **current, "started_at": datetime.now(timezone.utc).isoformat(),
+                    **farm_identity(str(paths.root.resolve())), "execution_epoch": epoch,
+                    "scheduler_attestation": scheduler_attestation,
                     "pid_starttime": proc_starttime(os.getpid()),
                     **({"upgraded_from_source": upgrade} if upgrade is not None else {}),
                     "executor": args.executor, "session": args.session,
@@ -502,6 +512,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan-only", action="store_true", help="validate and print the command without stopping")
     p.set_defaults(func=cmd_restart)
     p = sub.add_parser("reconcile", help="run the actuating control loop")
+    p.add_argument("--slurm-job-id", help="launcher-attested allocation ID; pair with --slurm-node (otherwise use Slurm environment)")
+    p.add_argument("--slurm-node", help="exact local Slurm NodeName, not a derived hostname; pair with --slurm-job-id")
     p.add_argument("--upgrade-from-source", metavar="SHA256",
                    help="explicit same-host/protocol source upgrade from this recorded digest; requires pinned-host and stopped writers")
     p.add_argument("--executor", choices=list(EXECUTOR_NAMES),

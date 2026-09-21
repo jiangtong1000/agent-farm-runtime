@@ -18,6 +18,9 @@ class Observations:
     def command(self, argv: list[str], *, missing: str | None = None) -> str:
         env = {**os.environ, "LC_ALL": "C"}
         env.pop("TMUX", None)  # Never inherit the worker executor's selected server.
+        if argv[0] == "scontrol":
+            env.pop("SLURM_CLUSTERS", None)  # Use this execution host's configured scheduler.
+            env.update(SLURM_TIME_FORMAT="standard", TZ="UTC")
         try:
             out = self.run(argv, capture_output=True, text=True, timeout=10, env=env)
         except PermissionError as exc:
@@ -26,9 +29,9 @@ class Observations:
             raise AccessError("UNREACHABLE", "observation_unreachable", "Observation command unavailable or timed out") from exc
         if out.returncode:
             error = (out.stderr or "").lower()
-            if "permission denied" in error or "access denied" in error:
+            if any(text in error for text in ("permission denied", "access denied", "operation not permitted")):
                 raise AccessError("AUTH_REQUIRED", "command_permission", "Observation permission denied")
-            if missing and ("can't find session:" in error or "can't find window:" in error):
+            if missing and re.fullmatch(r"(?:can't find|no such) (?:session|window):? [^\r\n]+", error.strip()):
                 raise AccessError("SESSION_MISSING", missing, "The exact control endpoint is missing")
             raise AccessError("UNREACHABLE", "observation_failed", "Observation command failed; no fallback attempted")
         require(isinstance(out.stdout, str) and len(out.stdout) <= 1024 * 1024,
@@ -84,19 +87,23 @@ class Observations:
         if window is not None:
             identifier(window)
         device, inode = self.socket_identity(socket)
-        prefix = ["tmux", "-N", "-S", socket]
+        # These commands do not have tmux's CMD_STARTSERVER flag (including 2.7).
+        # A disappeared server is a failed observation, never a creation request.
+        prefix = ["tmux", "-S", socket]
         # '=' disables tmux's usual prefix/glob fallback. Bind immutable IDs too.
         raw = self.command([*prefix, "display-message", "-p", "-t", f"={session}:",
-                            "#{session_id}\t#{session_name}\t#{pid}"], missing="session_missing")
-        parts = raw.strip().split("\t")
+                            "#{session_id}|#{session_name}|#{pid}"], missing="session_missing")
+        # tmux 2.7 replaces tabs with underscores in the C locale. Use a
+        # printable delimiter excluded from the accepted session names.
+        parts = raw.strip().split("|")
         require(len(parts) == 3 and parts[1] == session and re.fullmatch(r"\$[0-9]+", parts[0])
                 and parts[2].isdigit(), "CONFLICT", "session_identity", "Unexpected tmux session identity")
         session_id, _, pid = parts
         window_id = None
         if window is not None:
             raw = self.command([*prefix, "list-windows", "-t", session_id,
-                                "-F", "#{window_id}\t#{window_index}\t#{window_name}"], missing="session_missing")
-            rows = [line.split("\t") for line in raw.splitlines()]
+                                "-F", "#{window_id}|#{window_index}|#{window_name}"], missing="session_missing")
+            rows = [line.split("|", 2) for line in raw.splitlines()]
             require(all(len(row) == 3 and re.fullmatch(r"@[0-9]+", row[0]) and row[1].isdigit() for row in rows),
                     "UNREACHABLE", "window_observation", "Invalid window observation")
             matches = [row for row in rows if row[1 if window.isdecimal() else 2] == window]
@@ -113,7 +120,7 @@ class Observations:
 
     def environment(self, record: dict) -> dict[str, str]:
         control = record["control"]
-        raw = self.command(["tmux", "-N", "-S", control["socket"], "show-environment", "-t", control["session_id"]],
+        raw = self.command(["tmux", "-S", control["socket"], "show-environment", "-t", control["session_id"]],
                            missing="session_missing")
         # Do not retain or expose unrelated (possibly secret) session environment.
         return {key: value for line in raw.splitlines() if "=" in line
@@ -126,6 +133,6 @@ class Observations:
         control = record["control"]
         for key, value in expected.items():
             if key not in observed:
-                self.command(["tmux", "-N", "-S", control["socket"], "set-environment",
+                self.command(["tmux", "-S", control["socket"], "set-environment",
                               "-t", control["session_id"], key, value], missing="session_missing")
         require(self.environment(record) == expected, "CONFLICT", "marker_mismatch", "Session marker binding did not verify")

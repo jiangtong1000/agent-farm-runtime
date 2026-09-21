@@ -28,7 +28,7 @@ def write(path, value):
 class FakeObservations(Observations):
     def __init__(self, socket):
         self.socket = str(socket)
-        self.jobs = {"123": {"job_id": "123", "state": "RUNNING", "nodes": ["node-a.example"],
+        self.jobs = {"123": {"job_id": "123", "state": "RUNNING", "nodes": ["node-a"],
                              "owner_uid": os.getuid(), "allocation_started_at": "2026-01-01T00:00:00"}}
         self.sessions = {"master": "$1", "master-other": "$2", "workers": "$3"}
         self.windows = {"main": "@1", "logs": "@2", "0": "@1"}
@@ -56,10 +56,10 @@ class FakeObservations(Observations):
         return self.env.get(record["control"]["session_id"], {}).copy()
 
     def command(self, argv, **kwargs):
-        assert argv[:4] == ["tmux", "-N", "-S", self.socket]
-        assert argv[4:6] == ["set-environment", "-t"]
+        assert argv[:3] == ["tmux", "-S", self.socket]
+        assert argv[3:5] == ["set-environment", "-t"]
         self.calls.append(tuple(argv))
-        self.env.setdefault(argv[6], {})[argv[7]] = argv[8]
+        self.env.setdefault(argv[5], {})[argv[6]] = argv[7]
         return ""
 
     def default_socket(self):
@@ -77,6 +77,10 @@ class Farm:
                          "execution_epoch": "initial", "pid": 222, "pid_starttime": 33,
                          "started_at": (self.now - timedelta(seconds=2)).isoformat(), "loop": True, "interval": 30,
                          "executor": "codex-tmux", "session": "workers", "tmux_socket": "worker-socket"}
+        self.manifest["scheduler_attestation"] = {
+            "kind": "slurm", "job_id": "123", "scheduler_node": "node-a",
+            "allocation_started_at": "2026-01-01T00:00:00", "owner_uid": os.getuid(),
+            "runtime_host": self.identity["host"], "execution_epoch": "initial"}
         self.save()
         self.tick()
         self.registry = Registry(tmp_path / "access")
@@ -94,17 +98,20 @@ class Farm:
 
     def publish(self, **kwargs):
         options = {"job_id": "123", "control_session": "master", "default_window": "main", **kwargs}
-        return self.access.publish(self.paths, "delta/primary", **options)
+        return self.access.publish(self.paths, "cluster/study-a", **options)
 
     @property
     def directory(self):
-        return self.registry.target_dir("delta/primary")
+        return self.registry.target_dir("cluster/study-a")
 
     def claim(self):
         self.manifest.update(execution_epoch="move-2", host="node-b.example", pid=223,
                              handoff={"phase": "claimed", "id": "move-2", "target_host": "node-b.example"})
         self.identity["host"] = "node-b.example"
-        self.obs.jobs["124"] = {**self.obs.jobs["123"], "job_id": "124", "nodes": ["node-b.example"]}
+        self.obs.jobs["124"] = {**self.obs.jobs["123"], "job_id": "124", "nodes": ["node-b"]}
+        self.manifest["scheduler_attestation"] = {
+            **self.manifest["scheduler_attestation"], "job_id": "124", "scheduler_node": "node-b",
+            "execution_epoch": "move-2", "runtime_host": "node-b.example"}
         self.save()
 
 
@@ -141,18 +148,19 @@ def test_publish_resolve_verify_and_reads_have_no_mutations(farm):
     assert contents(farm.paths.root) == before  # even task/manifest/tick files are untouched
     before = contents(farm.registry.root)
     calls = len(farm.obs.calls)
-    resolved = farm.access.resolve("delta/primary")
+    resolved = farm.access.resolve("cluster/study-a")
     assert resolved["state"] == "RESOLVED" and not resolved["verified"] and "attachment" not in resolved
     assert len(farm.obs.calls) == calls  # resolution uses only shared records
-    verified = farm.access.verify(farm.paths, "delta/primary", expected_record=resolved["record_sha256"])
-    assert verified["attachment"]["argv"] == ["tmux", "-N", "-S", farm.obs.socket, "attach-session", "-t", "$1:@1"]
+    verified = farm.access.verify(farm.paths, "cluster/study-a", expected_record=resolved["record_sha256"])
+    assert verified["attachment"]["argv"] == ["tmux", "-S", farm.obs.socket, "if-shell", "-F", "-t",
+                                            "$1:@1", "1", "attach-session -t '$1:@1'"]
     assert contents(farm.registry.root) == before
 
 
 def test_readers_never_create_a_missing_target(farm):
     before = contents(farm.registry.root)
-    fails("UNPUBLISHED", lambda: farm.access.resolve("rc/primary"))
-    fails("UNPUBLISHED", lambda: farm.access.verify(farm.paths, "rc/primary"))
+    fails("UNPUBLISHED", lambda: farm.access.resolve("cluster/study-b"))
+    fails("UNPUBLISHED", lambda: farm.access.verify(farm.paths, "cluster/study-b"))
     assert contents(farm.registry.root) == before
     assert not (farm.registry.root / "targets").exists()
 
@@ -171,8 +179,8 @@ def test_handoff_withholds_publication_and_resolution(farm, phase):
     before = contents(farm.registry.root)
     farm.manifest["handoff"] = {"id": "move-2", "phase": phase, "target_host": "node-b.example"}
     farm.save()
-    for action in (farm.publish, lambda: farm.access.resolve("delta/primary"),
-                   lambda: farm.access.verify(farm.paths, "delta/primary")):
+    for action in (farm.publish, lambda: farm.access.resolve("cluster/study-a"),
+                   lambda: farm.access.verify(farm.paths, "cluster/study-a")):
         fails("PENDING", action, "handoff_" + phase)
     assert contents(farm.registry.root) == before
 
@@ -218,7 +226,7 @@ def test_allocation_must_be_positively_running(farm, state, expected):
 def test_running_job_on_other_node_or_owned_by_other_user_is_rejected(farm):
     farm.obs.jobs["123"]["nodes"] = ["node-z.example"]
     fails("HOST_MISMATCH", farm.publish)
-    farm.obs.jobs["123"]["nodes"] = ["node-a.example"]
+    farm.obs.jobs["123"]["nodes"] = ["node-a"]
     farm.obs.jobs["123"]["owner_uid"] += 1
     fails("AUTH_REQUIRED", farm.publish)
 
@@ -233,13 +241,13 @@ def test_claim_needs_new_tick_running_job_and_new_control_session(farm):
     farm.obs.jobs["124"]["state"] = "PENDING"
     fails("PENDING", lambda: farm.publish(job_id="124", control_session="master-other"))
     assert (farm.directory / "current.json").read_bytes() == old_pointer
-    fails("EPOCH_MISMATCH", lambda: farm.access.resolve("delta/primary"))
+    fails("EPOCH_MISMATCH", lambda: farm.access.resolve("cluster/study-a"))
     farm.obs.jobs["124"]["state"] = "RUNNING"
     fails("CONFLICT", lambda: farm.publish(job_id="124"), "marker_conflict")
     new = farm.publish(job_id="124", control_session="master-other")
     assert new["record"]["execution_epoch"] == "move-2"
     assert json.loads((farm.directory / "epochs/initial.json").read_text()) == original
-    assert farm.access.resolve("delta/primary")["record"] == new["record"]
+    assert farm.access.resolve("cluster/study-a")["record"] == new["record"]
 
 
 def test_queued_or_running_target_before_claim_cannot_publish(farm):
@@ -260,7 +268,7 @@ def test_unreachable_current_never_tries_old_generation(farm):
     farm.publish(job_id="124", control_session="master-other")
     farm.obs.calls.clear()
     farm.obs.jobs["124"] = AccessError("UNREACHABLE", "scheduler_timeout", "timeout")
-    fails("UNREACHABLE", lambda: farm.access.verify(farm.paths, "delta/primary"))
+    fails("UNREACHABLE", lambda: farm.access.verify(farm.paths, "cluster/study-a"))
     assert farm.obs.calls == [("scheduler", "124")]
     assert (farm.directory / "epochs/initial.json").exists()
 
@@ -284,7 +292,7 @@ def test_crash_retry_is_idempotent_and_never_selects_an_orphan(farm, monkeypatch
     instance = farm.directory / "epochs/initial.json"
     before = instance.read_bytes(), instance.stat().st_mtime_ns
     if failure != "after_pointer":
-        fails("UNPUBLISHED", lambda: farm.access.resolve("delta/primary"))
+        fails("UNPUBLISHED", lambda: farm.access.resolve("cluster/study-a"))
     farm.now += timedelta(seconds=1)
     first = farm.publish()
     second = farm.publish()
@@ -317,13 +325,13 @@ def test_concurrent_conflicting_publishers_do_not_replace_winner(farm):
         results = list(pool.map(publish, ["master", "master-other"]))
     assert sorted(r["state"] for r in results) == ["CONFLICT", "VERIFIED"]
     winner = next(r for r in results if r["state"] == "VERIFIED")
-    assert farm.access.resolve("delta/primary")["record"] == winner["record"]
+    assert farm.access.resolve("cluster/study-a")["record"] == winner["record"]
 
 
 def test_marker_mismatch_is_never_repaired_by_verify_or_publish(farm):
     farm.publish()
     farm.obs.env["$1"]["FARM_EXECUTION_EPOCH"] = "old"
-    for action in (farm.publish, lambda: farm.access.verify(farm.paths, "delta/primary")):
+    for action in (farm.publish, lambda: farm.access.verify(farm.paths, "cluster/study-a")):
         fails("CONFLICT", action)
         assert farm.obs.env["$1"]["FARM_EXECUTION_EPOCH"] == "old"
 
@@ -362,17 +370,17 @@ def test_daemon_readiness_is_an_exact_live_generation(farm, fault):
 def test_same_name_recreated_session_or_reused_job_is_stale(farm):
     farm.publish()
     farm.obs.sessions["master"] = "$99"
-    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "delta/primary"), "control_replaced")
+    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "cluster/study-a"), "control_replaced")
     farm.obs.sessions["master"] = "$1"
     farm.obs.jobs["123"]["allocation_started_at"] = "2026-02-02T00:00:00"
-    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "delta/primary"), "allocation_reused")
+    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "cluster/study-a"), "allocation_reused")
 
 
 def test_expected_record_and_project_are_checked_before_live_probes(farm):
     farm.publish()
     farm.obs.calls.clear()
-    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "delta/primary", expected_record="a" * 64))
-    fails("CONFLICT", lambda: farm.access.verify(FarmPaths(Path("/wrong/.farm")), "delta/primary"))
+    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "cluster/study-a", expected_record="a" * 64))
+    fails("CONFLICT", lambda: farm.access.verify(FarmPaths(Path("/wrong/.farm")), "cluster/study-a"))
     assert not farm.obs.calls
 
 
@@ -393,7 +401,7 @@ def test_corrupt_pointer_never_scans_for_an_instance(farm, fault):
     if fault == "duplicate_keys":
         pointer.write_text('{"schema_version":1,"schema_version":1}')
     fails("STALE_REGISTRY" if fault in {"digest", "epoch"} else "CONFLICT",
-          lambda: farm.access.resolve("delta/primary"))
+          lambda: farm.access.resolve("cluster/study-a"))
 
 
 def test_deployment_change_during_verification_is_rejected(farm, monkeypatch):
@@ -404,13 +412,13 @@ def test_deployment_change_during_verification_is_rejected(farm, monkeypatch):
         farm.save()
         return original(record)
     monkeypatch.setattr(farm.obs, "environment", changed)
-    fails("PENDING", lambda: farm.access.verify(farm.paths, "delta/primary"), "deployment_changed")
+    fails("PENDING", lambda: farm.access.verify(farm.paths, "cluster/study-a"), "deployment_changed")
 
 
 def test_deleted_current_is_unpublished_even_if_old_generation_is_valid(farm):
     farm.publish()
     (farm.directory / "current.json").unlink()
-    fails("UNPUBLISHED", lambda: farm.access.resolve("delta/primary"))
+    fails("UNPUBLISHED", lambda: farm.access.resolve("cluster/study-a"))
     assert (farm.directory / "epochs/initial.json").exists()
 
 
@@ -443,7 +451,7 @@ def test_publication_serializes_with_real_drain(farm, monkeypatch):
             release.set()
         assert publishing.result()["state"] == "VERIFIED"
         assert draining.result()["phase"] == "draining"
-    fails("PENDING", lambda: farm.access.resolve("delta/primary"), "handoff_draining")
+    fails("PENDING", lambda: farm.access.resolve("cluster/study-a"), "handoff_draining")
 
 
 def test_pointer_changed_during_verify_is_rejected(farm, monkeypatch):
@@ -456,7 +464,7 @@ def test_pointer_changed_during_verify_is_rejected(farm, monkeypatch):
         write(pointer, value)
         return original(record)
     monkeypatch.setattr(farm.obs, "environment", changed)
-    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "delta/primary"))
+    fails("STALE_REGISTRY", lambda: farm.access.verify(farm.paths, "cluster/study-a"))
 
 
 @pytest.mark.parametrize("field,new,state", [
@@ -470,8 +478,8 @@ def test_existing_record_must_match_deployment_before_any_probe(farm, field, new
     farm.manifest[field] = new
     farm.save()
     farm.obs.calls.clear()
-    for action in (lambda: farm.access.resolve("delta/primary"),
-                   lambda: farm.access.verify(farm.paths, "delta/primary")):
+    for action in (lambda: farm.access.resolve("cluster/study-a"),
+                   lambda: farm.access.verify(farm.paths, "cluster/study-a")):
         fails(state, action)
     assert not farm.obs.calls
 
@@ -509,7 +517,7 @@ def test_read_only_cli_does_not_load_mutation_backend(farm, monkeypatch, capsys)
     monkeypatch.setattr("agent_farm_runtime.adapters.filesystem._implementation", forbidden)
     for action, state in (("resolve", "RESOLVED"), ("verify", "VERIFIED")):
         args = build_parser().parse_args(["--project", str(farm.paths.root.parent), "access", action,
-            "--registry", str(farm.registry.root), "--target", "delta/primary", "--json"])
+            "--registry", str(farm.registry.root), "--target", "cluster/study-a", "--json"])
         assert args.func(args) == 0
         assert json.loads(capsys.readouterr().out)["state"] == state
     farm.obs.jobs["123"] = AccessError("UNREACHABLE", "timeout", "timeout")
@@ -517,3 +525,88 @@ def test_read_only_cli_does_not_load_mutation_backend(farm, monkeypatch, capsys)
     result = json.loads(capsys.readouterr().out)
     assert result["state"] == "UNREACHABLE" and not result["verified"] and "attachment" not in result
     assert (contents(farm.paths.root), contents(farm.registry.root)) == before
+
+
+def test_fqdn_runtime_and_exact_short_scheduler_node_are_separate(farm):
+    farm.obs.jobs["123"]["nodes"] = ["node-z", "node-a", "node-b"]
+    record = farm.publish()["record"]
+    assert record["runtime_host"] == "node-a.example"
+    assert record["scheduler"]["scheduler_node"] == "node-a"
+    assert farm.obs.env["$1"]["FARM_RUNTIME_HOST"] == "node-a.example"
+    assert farm.obs.env["$1"]["FARM_SLURM_NODE"] == "node-a"
+    assert farm.obs.env["$1"]["FARM_SLURM_START_TIME"] == record["scheduler"]["allocation_started_at"]
+    assert farm.access.verify(farm.paths, "cluster/study-a")["state"] == "VERIFIED"
+    farm.obs.jobs["123"]["nodes"] = ["node-a.example", "node-b"]
+    fails("HOST_MISMATCH", lambda: farm.access.verify(farm.paths, "cluster/study-a"))
+
+
+@pytest.mark.parametrize("attestation,state", [(None, "PENDING"), ({}, "CONFLICT"), ([], "CONFLICT")])
+def test_publish_requires_scheduler_attestation(farm, attestation, state):
+    farm.manifest["scheduler_attestation"] = attestation
+    farm.save()
+    fails(state, farm.publish)
+    assert not farm.obs.calls and not farm.obs.env
+    assert not (farm.directory / "current.json").exists()
+
+
+@pytest.mark.parametrize("field,value,state", [
+    ("execution_epoch", "old", "EPOCH_MISMATCH"),
+    ("runtime_host", "node-other.example", "HOST_MISMATCH"),
+    ("scheduler_node", ["node-a", "node-b"], "CONFLICT"),
+    ("scheduler_node", "node-[a-b]", "CONFLICT"),
+    ("scheduler_node", "node-a,node-b", "CONFLICT"),
+    ("allocation_started_at", "Unknown", "CONFLICT"),
+    ("owner_uid", True, "CONFLICT"),
+])
+def test_invalid_or_old_attestation_fails_before_live_queries(farm, field, value, state):
+    farm.manifest["scheduler_attestation"][field] = value
+    farm.save()
+    fails(state, farm.publish)
+    assert not farm.obs.calls
+
+
+def test_publish_job_id_must_match_startup_even_if_other_job_is_running(farm):
+    farm.obs.jobs["124"] = {**farm.obs.jobs["123"], "job_id": "124"}
+    fails("CONFLICT", lambda: farm.publish(job_id="124"), "attested_job")
+    assert not farm.obs.calls
+
+
+def test_requeued_job_cannot_publish_against_old_startup(farm):
+    farm.obs.jobs["123"]["allocation_started_at"] = "2026-02-01T00:00:00"
+    fails("STALE_REGISTRY", farm.publish, "allocation_reused")
+    assert not farm.obs.env
+
+
+def test_attestation_is_part_of_daemon_readiness(farm):
+    farm.manifest["scheduler_attestation"]["job_id"] = "124"
+    farm.save()
+    fails("PENDING", lambda: farm.publish(job_id="124"), "readiness_generation")
+    assert not farm.obs.calls
+
+
+@pytest.mark.parametrize("marker", ["FARM_RUNTIME_HOST", "FARM_SLURM_NODE", "FARM_SLURM_START_TIME"])
+def test_scheduler_and_host_markers_are_required_and_never_repaired(farm, marker):
+    farm.publish()
+    farm.obs.env["$1"][marker] = "wrong"
+    fails("CONFLICT", lambda: farm.access.verify(farm.paths, "cluster/study-a"), "marker_mismatch")
+    fails("CONFLICT", farm.publish, "marker_conflict")
+    assert farm.obs.env["$1"][marker] == "wrong"
+
+
+def test_schema_one_requires_exact_scheduler_node(farm):
+    from agent_farm_runtime.access.contract import validate_record
+    record = farm.publish()["record"]
+    del record["scheduler"]["scheduler_node"]
+    fails("CONFLICT", lambda: validate_record(record, record["target"], record["execution_epoch"]), "scheduler")
+
+
+def test_target_cannot_move_to_another_farm_but_distinct_targets_can_coexist(farm, tmp_path):
+    first = farm.publish()["record"]
+    other = Farm(tmp_path / "another-farm")
+    other.access.registry = farm.registry
+    before = contents(farm.registry.root)
+    fails("CONFLICT", other.publish, "target_binding")
+    assert contents(farm.registry.root) == before and not other.obs.env
+    second = other.access.publish(other.paths, "cluster/another-study", job_id="123", control_session="master")
+    assert second["record"]["farm_id"] != first["farm_id"]
+    assert farm.access.resolve("cluster/study-a")["record"] == first

@@ -1,8 +1,12 @@
 # Control-session access protocol
 
-The access layer maps an explicit logical target such as `delta/primary` or
-`rc/primary` to a verified, human-facing Master tmux session. Nodes, allocations
-and sessions can change across execution epochs without changing that target.
+The access layer maps an explicit, farm-specific target such as `cluster/study-a`
+to a verified, human-facing Master tmux session. A target is permanently bound
+to one farm and canonical root. Nodes, allocations and sessions can change
+across execution epochs without changing that target. Another farm uses another
+target, such as `cluster/study-b`; a site prefix does not mean "whichever farm
+is active here." A movable shorthand such as local `farm delta` belongs to a
+future local client, never to this remote registry.
 The Master operates this layer under the Owner's deployment authority. It uses
 the CLI; it never edits access JSON, deployment JSON or tmux identity markers.
 
@@ -46,9 +50,14 @@ Publication requires all of the following:
   a completed tick stamped with that daemon's startup identity and execution
   epoch; and a tick between startup and now, no older than three loop intervals.
   A claim alone, a one-pass reconcile, or an old daemon's tick is insufficient.
-- The exact numeric Slurm allocation is positively `RUNNING`, belongs to the
-  publishing UID and includes the exact deployment hostname in its NodeList.
-  Slurm's allocation StartTime is retained to detect job ID reuse.
+- The deployment has a scheduler attestation bound to this runtime host, UID and
+  epoch, captured at reconciler startup. Its job ID must equal `--job-id`.
+  The exact numeric Slurm allocation is positively `RUNNING`, belongs to that
+  UID and includes the attested `scheduler_node` in its expanded NodeList.
+  StartTime must match startup, catching job ID reuse and requeues before even
+  the first publication. A runtime FQDN and a short Slurm NodeName are separate
+  facts. No hostname shortening, DNS inference or selection of another member
+  of a multi-node allocation is allowed.
 - The exact Unix socket exists and belongs to that UID, the exact session exists,
   and the optional window exists uniquely. The socket device/inode, server
   PID/start/boot identity, native session ID and optional window ID are bound.
@@ -56,7 +65,8 @@ Publication requires all of the following:
   markers, but refuses conflicting ones. Verify only reads them.
 
 The markers are `FARM_ID`, `FARM_EXECUTION_EPOCH`, `FARM_SLURM_JOB_ID`, `FARM_ROOT`,
-`FARM_ACCESS_TARGET`, `FARM_SOURCE_SHA256` and `FARM_PROTOCOL_VERSION`.
+`FARM_ACCESS_TARGET`, `FARM_SOURCE_SHA256`, `FARM_PROTOCOL_VERSION`,
+`FARM_RUNTIME_HOST`, `FARM_SLURM_NODE` and `FARM_SLURM_START_TIME`.
 They are **session** environment values, not inferred pane environment or global
 tmux state. Unrelated environment values are not returned or persisted.
 
@@ -65,6 +75,9 @@ This gives the existing path-bound farm an identity that survives host turnover.
 It is not a credential or a claim of global uniqueness across unrelated storage
 systems. Relocation, cloning a farm, reusing its directory for a different farm,
 or reassigning a target is not supported by this access schema.
+Cross-cluster or cross-storage migration is an explicit operator migration/recovery
+operation with destination storage/registry provisioning. It is never an access
+resolution fallback, even if a different storage system has an identical pathname.
 
 ## CLI
 
@@ -76,16 +89,16 @@ There is no default registry discovery and no built-in site aliases.
 farm access init --registry /shared/farm-access --attest-shared-storage
 
 farm --project /shared/farms/F1 access publish \
-  --registry /shared/farm-access --target delta/primary \
+  --registry /shared/farm-access --target cluster/study-a \
   --job-id "$SLURM_JOB_ID" --control-session master \
   --control-socket /run/user/1001/farm-master.sock \
   --default-window main --expected-epoch node-002 --json
 
 farm access resolve \
-  --registry /shared/farm-access --target delta/primary --json
+  --registry /shared/farm-access --target cluster/study-a --json
 
 farm --project /shared/farms/F1 access verify \
-  --registry /shared/farm-access --target delta/primary \
+  --registry /shared/farm-access --target cluster/study-a \
   --expected-record RECORD_SHA256_FROM_RESOLVE --json
 ```
 
@@ -97,7 +110,7 @@ and their macOS equivalents), including symlinks into them; a path outside those
 locations alone does not prove persistence. A **control socket** may be on a
 node-local volatile filesystem: its durable identity lives in the registry.
 
-Targets are `NAME` or `SITE/NAME`. Each component, control session name and window
+Targets are `NAME` or `SITE/FARM`. Each component, control session name and window
 name uses `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. Numeric window arguments select an exact
 window index; other arguments select an exact name and reject duplicate names.
 Epochs use the existing `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` convention. Slurm job IDs
@@ -111,6 +124,38 @@ is ignored. Explicit socket paths are preferable in deployment scripts.
 `--default-window` and `--expected-epoch` are optional. Without a window, access
 binds the session and leaves window selection to tmux.
 
+### Reconciler startup attestation
+
+Start the reconciler on the allocated execution node through its launcher. By
+default it captures `SLURM_JOB_ID` (or legacy `SLURM_JOBID`) and
+`SLURMD_NODENAME`. If both job variables are present they must agree. These are
+standard [Slurm launcher variables](https://slurm.schedmd.com/sbatch.html#SECTION_OUTPUT-ENVIRONMENT-VARIABLES),
+not node-list discovery. `SLURM_JOB_NODELIST`, the first allocation node, and a
+shortened runtime hostname cannot substitute for the local node identity.
+
+A launcher that does not preserve those variables can supply an explicit pair:
+
+```bash
+farm --project /shared/farms/F1 reconcile --loop \
+  --executor codex-tmux --session workers \
+  --slurm-job-id 12345 --slurm-node node-b
+```
+
+Both options are required together. They must agree with any standard variables
+that are present. The launcher attests which NodeName it is executing on; the
+runtime checks that exact allocation's UID, RUNNING state, StartTime and node
+membership before constructing an executor or recording startup. Membership
+alone is not a way for the publisher to select a node. The launcher/environment
+is a cooperative trust boundary, not proof against fabricated same-UID input.
+Missing, malformed, conflicting or unreachable evidence cannot produce an
+attestation. A non-Slurm startup with neither input is allowed, but cannot publish
+Slurm control access. Restarting an attested deployment requires fresh inputs
+and the identical allocation identity; changing allocation requires a new epoch.
+
+Claim and offline recovery clear `scheduler_attestation`. The new reconciler
+must capture its own allocation and write a completed tick carrying the same
+attestation. No allocation data is inherited from the previous epoch.
+
 All four commands output JSON; `--json` is accepted for explicit client intent.
 Exit code 0 means `INITIALIZED`, `RESOLVED` or `VERIFIED`; protocol failures
 return 1. Invalid CLI syntax and wrapper policy failures retain the existing CLI
@@ -120,13 +165,13 @@ insufficient.
 
 ## Durable schema 1
 
-For target `delta/primary`:
+For target `cluster/study-a`:
 
 ```text
 /shared/farm-access/
   registry.json
   registry.lock
-  targets/delta/primary/
+  targets/cluster/study-a/
     publish.lock
     binding.json
     epochs/initial.json
@@ -150,7 +195,7 @@ digest placeholders below are illustrative):
 ```json
 {
   "schema_version": 1,
-  "target": "delta/primary",
+  "target": "cluster/study-a",
   "farm_id": "farm-<sha256-of-canonical-farm-root>",
   "farm_root": "/shared/farms/F1/.farm",
   "execution_epoch": "node-002",
@@ -161,6 +206,7 @@ digest placeholders below are illustrative):
   "scheduler": {
     "kind": "slurm",
     "job_id": "12345",
+    "scheduler_node": "node-b",
     "allocation_started_at": "2026-01-01T12:00:00"
   },
   "control": {
@@ -180,17 +226,40 @@ digest placeholders below are illustrative):
 ```
 
 `default_window` and `window_id` must both be null if no window is specified.
-`allocation_started_at` preserves Slurm's StartTime string; `published_at` is a
-timezone-bearing ISO timestamp. Integer fields do not accept booleans.
+`allocation_started_at` preserves Slurm's StartTime in standard ISO format
+`YYYY-MM-DDTHH:MM:SS`, observed with `TZ=UTC` and `SLURM_TIME_FORMAT=standard`;
+`published_at` is a timezone-bearing ISO timestamp. Integer fields do not accept booleans.
 Unknown fields/versions, duplicate JSON keys, non-finite values, oversized files,
 invalid identifiers and symlink records are rejected.
+
+Deployment `scheduler_attestation` is null when unattested; otherwise it has
+exactly the four fields of `scheduler` above plus `execution_epoch`,
+`runtime_host` and `owner_uid`. For this example:
+
+```json
+{
+  "kind": "slurm",
+  "job_id": "12345",
+  "scheduler_node": "node-b",
+  "allocation_started_at": "2026-01-01T12:00:00",
+  "execution_epoch": "node-002",
+  "runtime_host": "node-b.example",
+  "owner_uid": 1001
+}
+```
+
+The host and epoch must equal deployment `host` and `execution_epoch` exactly.
+`scheduler_node` is a single `[A-Za-z0-9][A-Za-z0-9_.-]{0,254}` identifier, never
+a list or hostname alias. Status exposes the attestation, and the completed-tick
+identity stamp includes it. Access records, deployment, scheduler observations
+and session markers must all agree before `VERIFIED` can be returned.
 
 `current.json` is exactly:
 
 ```json
 {
   "schema_version": 1,
-  "target": "delta/primary",
+  "target": "cluster/study-a",
   "execution_epoch": "node-002",
   "record_sha256": "<64-lowercase-hex-digits>"
 }
@@ -210,8 +279,12 @@ Every response contains `schema_version`, `state`, `target`, `verified`, `reason
   `project`, `registry`, `target`, `expected_record`. No attachment is authorized.
 - `VERIFIED`: `record`, `record_sha256`, and `attachment` containing `host` and
   an argv array, for example
-  `["tmux", "-N", "-S", "/run/user/1001/farm-master.sock", "attach-session", "-t", "$1:@1"]`.
+  `["tmux", "-S", "/run/user/1001/farm-master.sock", "if-shell", "-F", "-t", "$1:@1", "1", "attach-session -t '$1:@1'"]`.
   The command is returned, never executed by this layer.
+  The tmux 2.7-compatible format-only wrapper cannot start a server; it parses
+  the native-ID attach command only after connecting to the existing server.
+  `-F` does not run a shell. Clients must retain this wrapper, not extract a
+  bare `attach-session` command, which can start a server in tmux 2.7.
 
 The response state vocabulary is:
 
@@ -222,10 +295,10 @@ The response state vocabulary is:
 | INITIALIZED | Registry prepared; no target published by this action. |
 | UNPUBLISHED | Registry/target/current absent or registry unconfigured; no archive search. |
 | AUTH_REQUIRED | Storage, socket, allocation owner or observation permission mismatch; correct access externally. |
-| PENDING | Audit/transaction, drain/release, allocation or reconciler readiness prevents access. |
+| PENDING | Audit/transaction, drain/release, missing scheduler attestation, allocation or reconciler readiness prevents access. |
 | JOB_EXPIRED | Positive terminal state for the exact recorded job; does not authorize replacement. |
 | STALE_REGISTRY | Source/protocol, pointer digest, allocation start or native control identity changed. |
-| HOST_MISMATCH | Deployment, local verifier or exact allocation host disagrees. |
+| HOST_MISMATCH | Deployment/runtime host disagrees, or the attested scheduler node is absent from the exact allocation. |
 | EPOCH_MISMATCH | Current record or explicit epoch precondition differs from deployment. |
 | SESSION_MISSING | Exact socket/session/window is positively absent; no alternative selected. |
 | CONFLICT | Invalid schema, incompatible binding, markers or same-epoch publication. Preserve evidence. |
@@ -289,7 +362,9 @@ locking. This is not protection against a malicious account sharing that UID.
    Do not place the registry or `.farm` on node-local scratch.
 2. Through the separate site workflow, obtain the authorized Slurm allocation.
    On its exact deployment host, start the reconciler loop with the pinned
-   wrapper. Wait for a completed, fresh tick in `farm --project PROJECT status
+   wrapper and fresh launcher job/node inputs as described above. Confirm the
+   separate runtime host and scheduler node in `scheduler_attestation`.
+   Wait for a completed, fresh tick in `farm --project PROJECT status
    --json`. For an existing deployment, first use the reviewed stopped-writer
    upgrade procedure; do not patch identity fields into an old manifest.
 3. Through the normal Master launch procedure, create the human-facing tmux
@@ -319,7 +394,9 @@ locking. This is not protection against a malicious account sharing that UID.
    Access now reports PENDING; it does not redirect around drain.
 3. On the destination, run `farm --project PROJECT handoff claim --request-id
    node-002 --actor master`. Use the same source, runtime protocol and executor
-   settings. Start the reconciler loop and wait for its own completed tick.
+   settings. Claim clears the old scheduler attestation. Start the reconciler
+   loop with the destination's job ID and local NodeName, then wait for its own
+   completed tick. A RUNNING allocation or an old Slurm environment is insufficient.
 4. Create the destination's separate control session and start/resume the Master
    with its checkpoint. Run `access publish` for the **same logical target**,
    new allocation and explicit control endpoint, with `--expected-epoch node-002`.
@@ -342,12 +419,16 @@ own preconditions. Do not invent a handoff or delete records to bypass this rule
 
 This is **access schema 1**, an additive deployment contract; runtime protocol
 stays **4**. No task, receipt, lease, executor state or turnover control format is
-changed. Startup adds `farm_id`, `farm_root` and an explicit `execution_epoch`;
-heartbeat adds a `deployment` identity stamp. Existing status/board readers can
+changed. Startup adds `farm_id`, `farm_root`, an explicit `execution_epoch` and
+`scheduler_attestation`; heartbeat adds a `deployment` identity stamp including
+the attestation. Claim/recovery clear that field. Existing status/board readers can
 ignore them. An old manifest or tick cannot be used for access publication until
 a reviewed upgraded reconciler has started and completed a pass. Old binaries
 cannot provide this access CLI or readiness contract. They are not supported
 participants in an access-enabled deployment.
+This revision corrects the still-unmerged schema 1 directly. Earlier experimental
+records lacking `scheduler_node` are rejected, and incomplete marker sets cannot
+verify. There is no migration, automatic JSON rewrite or compatibility fallback.
 
 Use one fixed reviewed release for the daemon, publisher and verifier. A source
 upgrade after publication makes the record stale. Since records bind both build
@@ -358,16 +439,32 @@ Do not change build during a planned handoff.
 
 Linux process identity, POSIX durable storage, Slurm `scontrol` and tmux are
 required for publication/verification. Resolution only reads shared records and
-does not import a POSIX write backend or execute remote commands. Exact hostnames
-must agree between deployment and the expanded Slurm NodeList; short-name/FQDN
-guessing is intentionally absent. Slurm and tmux calls use argv arrays, a
-10-second subprocess timeout and no shell. The probe uses `scontrol --local
---oneliner show job JOBID`, expands only that job's NodeList, and uses `tmux -N
--S SOCKET` with exact targets. See the official [Slurm scontrol reference](https://slurm.schedmd.com/scontrol.html)
-and [tmux reference](https://man.openbsd.org/tmux.1).
+does not import a POSIX write backend or execute remote commands. Deployment's
+runtime hostname must match the verifier exactly; Slurm NodeName is checked
+separately against the captured attestation. Slurm and tmux calls use argv arrays,
+a 10-second subprocess timeout and no shell. The probe uses `scontrol --local
+--oneliner show job JOBID` and expands only that job's NodeList. It removes
+`SLURM_CLUSTERS` from the probe environment; execution-host scheduler configuration
+is the deployment boundary, not a cross-cluster routing hint.
+
+The tmux 2.7-compatible probes use explicit absolute `tmux -S SOCKET` with
+`display-message`, `list-windows` and `show-environment`; publication also uses
+`set-environment`. These commands do not request server startup. Exact `=SESSION:`
+lookup rejects prefixes; replies are checked against the exact name and native
+IDs. A printable field separator avoids tmux 2.7's tab rewriting in the C locale.
+The attachment wrapper uses `if-shell -F`, which also has no server-start flag;
+see the [tmux 2.7 client](https://github.com/tmux/tmux/blob/2.7/client.c),
+[if-shell](https://github.com/tmux/tmux/blob/2.7/cmd-if-shell.c), and
+[attach-session](https://github.com/tmux/tmux/blob/2.7/cmd-attach-session.c) sources.
+There is no version-detection fallback or unconditional `-N`.
+Both `can't find session: NAME` and `can't find session NAME` are positive missing
+endpoint observations. Permission errors remain AUTH_REQUIRED; server races,
+connection failures and unexpected command failures remain UNREACHABLE. No error triggers
+a session scan, alternate socket, retry with a weaker target, or server creation.
 
 A later `farm-connect` client can map a local word such as `delta` to a configured
-resolver transport, registry and `delta/primary`. It runs resolve where the shared
+resolver transport, registry and one farm-specific target. Only that client's
+local configuration may move the shorthand to a different farm. It runs resolve where the shared
 farm paths are mounted, carries `expected_record` to verify on the exact host,
 then handles authentication and the returned attachment argv. No local Mac mount
 is required if resolution runs remotely. SSH aliases, credentials, ControlMaster,
@@ -382,17 +479,31 @@ Unix socket fixtures. They test concurrent publication, crash boundaries,
 immutable retry, drain serialization, stale/unknown observations and read-only
 behavior. They do not establish a site's filesystem or hostname behavior.
 
-Local validation for this change on Linux, Python 3.11.4: **500 passed, 3 skipped**
-in 238.05 seconds. The skipped tests require an explicitly supplied private
-release wrapper, an offline recovery fixture, or the opt-in private tmux canary.
-No real Slurm/tmux canary, CI matrix run or site deployment was performed.
-The full regression command was:
+Local validation on Linux, Python 3.11.4: the focused access/portability suite
+passed **165 tests in 42.13 seconds**. The full suite, including the private access
+canaries, passed **566 tests, 3 skipped in 252.87 seconds**. The skips require a
+private release wrapper, an offline recovery fixture, or the older opt-in runtime
+tmux canary. The separate disposable-socket access canary passed **3 tests in 0.28 seconds**
+against installed **tmux 2.7**, exercising exact session/window lookup, markers,
+the returned attach argv, and missing/abandoned sockets without server creation.
+It uses `/dev/null` configuration and only its own private sockets/sessions.
+No real Slurm allocation, live farm, personal tmux server, site deployment or
+Mac client was touched. Scheduler results in all tests are synthetic.
+
+The full regression command enables only the new private access canaries:
 
 ```bash
 env -u FARM_RUN_TMUX_CANARY -u FARM_TEST_REFERENCE_WRAPPER \
-  PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
+  -u SLURM_JOB_ID -u SLURM_JOBID -u SLURMD_NODENAME \
+  FARM_RUN_ACCESS_TMUX_CANARY=1 PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
   python -m pytest -q -p no:cacheprovider
 ```
+
+For the focused mock suite, use the same command without
+`FARM_RUN_ACCESS_TMUX_CANARY=1` and append `tests/test_access.py
+tests/test_access_allocation.py tests/test_access_observations.py
+tests/test_portability.py`. To run just the disposable tmux checks, retain the
+flag and append `tests/test_access_tmux_canary.py`.
 
 Before production adoption, with separate authorization:
 
@@ -400,12 +511,18 @@ Before production adoption, with separate authorization:
    isolated shared registry and empty canary farm. Do not reuse a production
    target. Check the storage and exact Slurm/tmux command contracts on the site.
 2. On an explicitly provisioned allocation, start an empty reconciler and a
-   disposable control session. Publish/resolve/verify; try a wrong session,
+   disposable control session. Confirm actual launcher job ID and local NodeName,
+   separate runtime hostname, UID, RUNNING state and UTC StartTime against
+   `scontrol` and the startup attestation. Include a real FQDN/short-name pair
+   and, where available, a multi-node allocation whose other nodes are never
+   selected. Publish/resolve/verify; try a wrong session,
    socket and window, an incorrect job ID, a simulated observation timeout, and
    concurrent identical/conflicting publishes. Every refusal must omit attach.
 3. With two authorized overlapping allocations, complete normal drain, release,
    claim and readiness. Confirm the old pointer persists until verified publish,
    remains unusable after claim, and both immutable epoch files remain afterward.
+   Confirm claim clears the old attestation, the destination captures its own
+   job/node identity, and stale launcher input or a requeued StartTime is refused.
    Repeat a crash after the instance write in the disposable registry, then retry
    the identical publication. Check visibility and lock exclusion from both nodes.
 4. Preserve JSON outputs and task/event snapshots, verify that reads changed no

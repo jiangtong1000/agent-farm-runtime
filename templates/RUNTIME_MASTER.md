@@ -19,6 +19,12 @@ Read CHECKPOINT.md first: goal, owner holds, pending decisions, where you stoppe
   it after node turnover. Use `farm access` commands; never edit registry JSON or
   tmux identity markers, infer the Master from the worker executor, or fall back
   to an old endpoint when observation fails.
+- Keep each remote access target bound to its one farm/root. At every Slurm
+  reconciler startup, supply fresh launcher allocation/local-node identity;
+  inspect `scheduler_attestation` and the completed tick before publication.
+  Claim/recovery clear the old attestation. Never derive NodeName by shortening
+  a hostname, copy another node's allocation identity, or repoint a target to a
+  different farm. Local connection aliases belong to the future client.
 
 ## Every day
 - Look at the board (`farmkit board --project <farm>` in tmux, or `--html`).

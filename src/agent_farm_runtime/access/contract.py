@@ -13,8 +13,11 @@ SCHEMA_VERSION = 1
 NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 EPOCH = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 SHA256 = r"[0-9a-f]{64}"
+NODE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}"
+SCHEDULER_FIELDS = {"kind", "job_id", "scheduler_node", "allocation_started_at"}
 MARKERS = ("FARM_ID", "FARM_EXECUTION_EPOCH", "FARM_SLURM_JOB_ID", "FARM_ROOT",
-           "FARM_ACCESS_TARGET", "FARM_SOURCE_SHA256", "FARM_PROTOCOL_VERSION")
+           "FARM_ACCESS_TARGET", "FARM_SOURCE_SHA256", "FARM_PROTOCOL_VERSION",
+           "FARM_RUNTIME_HOST", "FARM_SLURM_NODE", "FARM_SLURM_START_TIME")
 
 
 class AccessError(RuntimeError):
@@ -70,9 +73,27 @@ def result(state: str, target: str | None, reason: str, detail: str, **extra) ->
 
 
 def markers(record: dict) -> dict[str, str]:
-    return dict(zip(MARKERS, (record["farm_id"], record["execution_epoch"], record["scheduler"]["job_id"],
-                             record["farm_root"], record["target"], record["source_sha256"],
-                             str(record["protocol_version"]))))
+    return {"FARM_ID": record["farm_id"], "FARM_EXECUTION_EPOCH": record["execution_epoch"],
+            "FARM_SLURM_JOB_ID": record["scheduler"]["job_id"], "FARM_ROOT": record["farm_root"],
+            "FARM_ACCESS_TARGET": record["target"], "FARM_SOURCE_SHA256": record["source_sha256"],
+            "FARM_PROTOCOL_VERSION": str(record["protocol_version"]), "FARM_RUNTIME_HOST": record["runtime_host"],
+            "FARM_SLURM_NODE": record["scheduler"]["scheduler_node"],
+            "FARM_SLURM_START_TIME": record["scheduler"]["allocation_started_at"]}
+
+
+def validate_scheduler(scheduler: dict) -> dict:
+    require(isinstance(scheduler, dict) and set(scheduler) == SCHEDULER_FIELDS
+            and scheduler["kind"] == "slurm", "CONFLICT", "scheduler", "Invalid scheduler record")
+    identifier(scheduler["job_id"], r"[1-9][0-9]*")
+    identifier(scheduler["scheduler_node"], NODE)
+    start = scheduler["allocation_started_at"]
+    require(isinstance(start, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", start) is not None,
+            "CONFLICT", "allocation_identity", "Expected Slurm StartTime in standard ISO format")
+    try:
+        datetime.fromisoformat(start)
+    except ValueError as exc:
+        raise AccessError("CONFLICT", "allocation_identity", "Invalid Slurm StartTime") from exc
+    return scheduler
 
 
 def validate_record(record: dict, target: str, epoch: str) -> dict:
@@ -95,11 +116,7 @@ def validate_record(record: dict, target: str, epoch: str) -> dict:
             and type(record["owner_uid"]) is int and record["owner_uid"] >= 0,
             "CONFLICT", "record_types", "Invalid protocol or owner")
     scheduler, control = record["scheduler"], record["control"]
-    require(isinstance(scheduler, dict) and set(scheduler) == {"kind", "job_id", "allocation_started_at"}
-            and scheduler["kind"] == "slurm", "CONFLICT", "scheduler", "Unsupported scheduler record")
-    identifier(scheduler["job_id"], r"[1-9][0-9]*")
-    require(isinstance(scheduler["allocation_started_at"], str) and bool(scheduler["allocation_started_at"]),
-            "CONFLICT", "allocation_identity", "Missing allocation start identity")
+    validate_scheduler(scheduler)
     require(isinstance(control, dict) and set(control) == {
         "socket", "socket_device", "socket_inode", "session", "session_id", "default_window", "window_id",
         "server_pid", "server_starttime", "boot_id"}, "CONFLICT", "control", "Invalid control endpoint")

@@ -17,6 +17,13 @@ Once an epoch is published, changing its source or control endpoint is a conflic
 `restart --to` alone does not create a new access generation. See the
 [access compatibility and upgrade constraints](ACCESS_PROTOCOL.md#compatibility-and-client-boundary).
 
+Unmerged access schema 1 now requires `scheduler.scheduler_node`, an epoch-bound
+deployment `scheduler_attestation`, and host/node/allocation-start tmux markers.
+This corrects schema 1 directly; there is no access-record migration or automatic
+repair. Runtime protocol stays 4. Claim/recovery clear the old attestation;
+reconciler startup captures and validates fresh launcher input before dispatch.
+Access observation and attachment support tmux 2.7 without `-N`.
+
 ## Shell
 
 Worker launch scripts need bash 4.4 or newer: they `wait` on the pid of the process

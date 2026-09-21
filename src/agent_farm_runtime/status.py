@@ -99,6 +99,7 @@ def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) ->
         deployment = {
             "farm_id": manifest.get("farm_id"), "farm_root": manifest.get("farm_root"),
             "execution_epoch": manifest.get("execution_epoch"),
+            "scheduler_attestation": manifest.get("scheduler_attestation"),
             "host": manifest.get("host"), "pid": manifest.get("pid"),
             "started_at": manifest.get("started_at"), "protocol_version": manifest.get("protocol_version"),
             "source_root": manifest.get("source_root"), "source_sha256": manifest.get("source_sha256"),

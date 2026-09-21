@@ -57,7 +57,7 @@ def add_parser(sub) -> None:
             action.add_argument("--attest-shared-storage", action="store_true",
                                 help="attest storage is persistent/shared and supports cooperative locks/fsync/rename")
         else:
-            action.add_argument("--target", required=True, help="stable NAME or SITE/NAME, never a discovered session")
+            action.add_argument("--target", required=True, help="NAME or SITE/FARM permanently bound to one farm/root")
         if name == "publish":
             action.add_argument("--job-id", required=True, help="exact numeric Slurm allocation ID")
             action.add_argument("--control-session", required=True, help="exact human-facing tmux session name")

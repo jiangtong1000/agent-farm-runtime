@@ -21,7 +21,7 @@ def farm_identity(root: str) -> dict:
 def deployment_stamp(manifest: dict) -> dict:
     """Bind completed heartbeats to the exact daemon, build and execution epoch."""
     keys = ("farm_id", "farm_root", "execution_epoch", "host", "boot_id", "pid_namespace",
-            "pid", "pid_starttime", "started_at", "source_sha256", "protocol_version")
+            "pid", "pid_starttime", "started_at", "source_sha256", "protocol_version", "scheduler_attestation")
     return {key: manifest.get(key) for key in keys}
 
 

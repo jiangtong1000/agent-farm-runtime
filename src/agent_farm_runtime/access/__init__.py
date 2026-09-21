@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..adapters.filesystem import exclusive_lock
-from ..adapters.slurm import slurm_job_terminal
 from ..lifecycle import daemon_alive
 from ..locking import task_mutation_lock
 from ..provenance import deployment_stamp, runtime_identity
@@ -19,6 +18,7 @@ from ..store import FarmPaths
 from .contract import (AccessError, EPOCH, SCHEMA_VERSION, SHA256, digest, farm_id, identifier,
                        markers, require, result, target_name, timestamp, validate_record)
 from .observations import Observations
+from .allocation import attested_scheduler, running_allocation
 from .registry import Registry, persistent_path, read_json
 
 
@@ -56,6 +56,10 @@ def match_manifest(record: dict, manifest: dict) -> None:
                                   ("source_sha256", "source_sha256", "STALE_REGISTRY"),
                                   ("protocol_version", "protocol_version", "STALE_REGISTRY")):
         require(record[field] == manifest[source], state, field, f"Registry/deployment {field} mismatch")
+    require(record["scheduler"] == attested_scheduler(manifest), "STALE_REGISTRY", "scheduler_attestation",
+            "Registry differs from the deployment's attested allocation")
+    require(record["owner_uid"] == manifest["scheduler_attestation"]["owner_uid"],
+            "AUTH_REQUIRED", "attested_owner", "Registry and attested allocation owner differ")
 
 
 class Access:
@@ -91,24 +95,15 @@ class Access:
         require(alive is not None, "UNREACHABLE", "daemon_unknown", "Daemon identity cannot be observed")
         require(alive is True, "PENDING", "daemon_not_running", "The recorded reconciler is not running")
 
-    def job(self, job_id: str, host: str, owner_uid: int) -> dict:
-        observed = self.observations.scheduler(job_id)
-        require(observed["job_id"] == job_id, "CONFLICT", "job_identity", "Scheduler job identity mismatch")
-        state = observed["state"]
-        require(not slurm_job_terminal(state), "JOB_EXPIRED", "job_terminal", "Allocation has a positive terminal observation")
-        if state in {"PENDING", "CONFIGURING", "SUSPENDED", "COMPLETING", "RESIZING", "REQUEUED", "REQUEUE_HOLD"}:
-            raise AccessError("PENDING", "allocation_not_running", f"Allocation is {state}")
-        require(state == "RUNNING", "UNREACHABLE", "job_unknown", "Scheduler did not establish RUNNING")
-        require(host in observed["nodes"], "HOST_MISMATCH", "allocation_host", "Allocation is not running on this exact host")
-        require(observed["owner_uid"] == owner_uid, "AUTH_REQUIRED", "allocation_owner", "Allocation belongs to another user")
-        return {"kind": "slurm", "job_id": job_id, "allocation_started_at": observed["allocation_started_at"]}
-
     def live(self, paths: FarmPaths, manifest: dict, record: dict) -> None:
+        match_manifest(record, manifest)
         self.local(manifest)
         require(hasattr(os, "getuid") and record["owner_uid"] == os.getuid(),
                 "AUTH_REQUIRED", "verification_user", "Verify as the control session's owner")
         self.ready(paths, manifest)
-        require(self.job(record["scheduler"]["job_id"], manifest["host"], record["owner_uid"]) == record["scheduler"],
+        scheduler = record["scheduler"]
+        require(running_allocation(self.observations, scheduler["job_id"], scheduler["scheduler_node"],
+                                   record["owner_uid"]) == scheduler,
                 "STALE_REGISTRY", "allocation_reused", "Allocation identity changed (including possible job ID reuse)")
         control = record["control"]
         require(self.observations.control(control["socket"], control["session"], control["default_window"]) == control,
@@ -152,7 +147,10 @@ class Access:
         return result("VERIFIED", record["target"], "exact_match", "Point-in-time verification; no attach performed",
                       record=record, record_sha256=digest(record), attachment={
                           "host": record["runtime_host"],
-                          "argv": ["tmux", "-N", "-S", control["socket"], "attach-session", "-t", target]})
+                          # Unlike attach-session, if-shell cannot start a server
+                          # in tmux 2.7. -F evaluates a format, never a shell.
+                          "argv": ["tmux", "-S", control["socket"], "if-shell", "-F", "-t", target,
+                                   "1", f"attach-session -t '{target}'"]})
 
     def publish(self, paths: FarmPaths, target: str, *, job_id: str, control_session: str,
                 control_socket: str | None = None, default_window: str | None = None,
@@ -171,8 +169,15 @@ class Access:
             self.local(manifest)
             if expected_epoch is not None:
                 require(manifest["execution_epoch"] == expected_epoch, "EPOCH_MISMATCH", "expected_epoch", "Deployment epoch changed")
+            scheduler = attested_scheduler(manifest)
+            require(scheduler["job_id"] == job_id, "CONFLICT", "attested_job",
+                    "--job-id contradicts the allocation attested at reconciler startup")
+            require(manifest["scheduler_attestation"]["owner_uid"] == configuration["owner_uid"],
+                    "AUTH_REQUIRED", "attested_owner", "Publish as the attested allocation owner")
             self.ready(paths, manifest)
-            scheduler = self.job(job_id, manifest["host"], configuration["owner_uid"])
+            require(running_allocation(self.observations, job_id, scheduler["scheduler_node"],
+                                       configuration["owner_uid"]) == scheduler,
+                    "STALE_REGISTRY", "allocation_reused", "Allocation changed since reconciler startup")
             socket = control_socket if control_socket is not None else self.observations.default_socket()
             require(Path(socket).is_absolute(), "CONFLICT", "socket_path", "Use an absolute control socket path")
             control = self.observations.control(socket, control_session, default_window)
