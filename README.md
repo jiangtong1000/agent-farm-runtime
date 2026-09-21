@@ -36,7 +36,7 @@ Slurm jobs and optional Codex or Claude Code workers in tmux.
 
 | Role | Responsibility |
 |---|---|
-| Owner | Defines goals, budgets and approval boundaries in natural language; discusses independent review and authorizes the next step. |
+| Owner | Develops the research direction and delegates authority in conversation; optionally sets resource limits, discusses independent review and authorizes the next step. |
 | Master agent | Sets up and operates the farm under that authority, turns the plan into task contracts, monitors progress, handles permitted code fixes, and records the owner's decisions. |
 | Reconciler daemon | Dispatches workers, applies lease-bound receipts, observes waiting conditions, and resumes eligible tasks. |
 | Worker | Runs `farmkit tick`, reads its summary, executes the receipt command it prints, and exits until the next wake. |
@@ -77,11 +77,36 @@ those queries with workspace evidence. Its viewing operations are read-only;
 interactive actions preview a CLI command and run it after confirmation. The board
 does not maintain a second task database.
 
+## Start through a Master conversation
+
+Give a new Master the repository URL or checkout path and a short request:
+
+> Read `templates/RUNTIME_MASTER.md` and set up a new farm for [project].
+> Handle the setup yourself; we'll discuss the research once it is ready.
+
+Setup does not require a research task or a numerical budget. The Master prepares
+the farm and checks its operation; research goals and acceptance criteria develop
+in the subsequent conversation. The normal resource policy is to use available
+capacity within the authorized account/allocation and site limits for agreed work.
+An Owner-specified resource ceiling is optional. The Master checks actual resource
+constraints and asks only when an unresolved choice affects execution.
+
+The [Master entrypoint](templates/RUNTIME_MASTER.md) covers initial setup and
+returning to an existing farm. The Master saves deployment details, operating
+instructions and a checkpoint in its own persistent working directory outside
+this repository. For Claude Code, it creates a local `CLAUDE.md` entrypoint there.
+Start subsequent Master sessions in that directory and say "catch up"; the Master
+reads the saved instructions and checks current runtime evidence before reporting.
+Other agent hosts should load the same saved `MASTER.md` explicitly.
+
+The Owner supplies research decisions and authority as needed; deployment commands
+and the full operating procedure do not need to be pasted into each conversation.
+
 ## Install and inspect a task
 
 The following sections are command references for the Master and contributors.
-As an Owner, you can instead ask: "Set up a farm for this project, run the approved
-comparisons within this budget, and bring the results back for review."
+As an Owner, you can instead ask: "Set up a farm for this project; we'll discuss
+the research once it is ready." The task examples below apply after a task is agreed.
 
 From a checkout of the chosen revision, the Master prepares the environment:
 
