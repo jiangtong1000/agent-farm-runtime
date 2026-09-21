@@ -51,6 +51,12 @@ parser = build_parser()
 for command in ("status", "task-list", "doctor", "version"):
     args = parser.parse_args(["--project", str(project), command])
     assert args.func(args) == 0
+import os
+os.environ.pop("FARM_ACCESS_REGISTRY", None)
+for action in ("resolve", "verify"):
+    args = parser.parse_args(["--project", str(project), "access", action, "--target", "primary", "--json"])
+    assert args.func(args) == 1  # unconfigured, still no write backend or directories
+assert "fcntl" not in sys.modules
 assert not project.exists()
 try:
     TaskStore(FarmPaths(project / ".farm")).create(Task("T1", "o", "d", "a"))

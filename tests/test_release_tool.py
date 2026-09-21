@@ -93,6 +93,29 @@ def test_rendered_wrapper_runs_read_only_commands_and_pins_source(release, tmp_p
     assert "--max-auto-restarts 3" in script and str(wrapper) in script
 
 
+def test_access_readers_bypass_only_wrapper_write_pin(release, tmp_path):
+    release_dir, info = release
+    site = tmp_path / "testsite.toml"
+    site.write_text(SITE.format(python=sys.executable))
+    proc = _run("wrapper", "--site", str(site), "--release", str(release_dir), "--out", str(tmp_path / "bin"))
+    assert proc.returncode == 0, proc.stderr
+    wrapper = tmp_path / "bin" / "farm"
+    wrapper.write_text(wrapper.read_text().replace(info["source_sha256"], "0" * 64))
+    env = {k: v for k, v in os.environ.items() if k != "FARM_ACCESS_REGISTRY"}
+    for action in ("resolve", "verify", "init", "publish"):
+        args = ["access", action]
+        if action != "init":
+            args += ["--target", "primary"]
+        if action == "publish":
+            args += ["--job-id", "123", "--control-session", "master"]
+        out = subprocess.run([str(wrapper), *args], text=True, capture_output=True, env=env)
+        if action in {"resolve", "verify"}:
+            assert out.returncode == 1, out.stderr
+            assert json.loads(out.stdout)["state"] == "UNPUBLISHED"
+        else:
+            assert out.returncode == 78 and "source" in out.stderr.lower(), out.stdout + out.stderr
+
+
 @pytest.mark.skipif(not REFERENCE_WRAPPER, reason="set FARM_TEST_REFERENCE_WRAPPER for an optional local comparison")
 def test_rendered_wrapper_differs_from_reference_only_in_pins(release, tmp_path):
     release_dir, _ = release

@@ -14,6 +14,17 @@ Read CHECKPOINT.md first: goal, owner holds, pending decisions, where you stoppe
   Ask in natural language when a decision falls outside the agreed authority.
 - The independent reviewer reports to the Owner. Record acceptance, rework or a
   new research round after the Owner communicates the decision to you.
+- When control access is configured, follow docs/ACCESS_PROTOCOL.md: publish the
+  explicitly chosen human-facing session only after daemon readiness, and verify
+  it after node turnover. Use `farm access` commands; never edit registry JSON or
+  tmux identity markers, infer the Master from the worker executor, or fall back
+  to an old endpoint when observation fails.
+- Keep each remote access target bound to its one farm/root. At every Slurm
+  reconciler startup, supply fresh launcher allocation/local-node identity;
+  inspect `scheduler_attestation` and the completed tick before publication.
+  Claim/recovery clear the old attestation. Never derive NodeName by shortening
+  a hostname, copy another node's allocation identity, or repoint a target to a
+  different farm. Local connection aliases belong to the future client.
 
 ## Every day
 - Look at the board (`farmkit board --project <farm>` in tmux, or `--html`).
@@ -39,3 +50,4 @@ Read CHECKPOINT.md first: goal, owner holds, pending decisions, where you stoppe
 farm --project <farm> task-show <id> --summary · task-ruling · task-accept · task-rework · task-amend · task-rotate
 farmkit watch · farmkit health · farmkit board
 farm init · farm task-create · farm stop · farm restart · tools/release.py
+farm access init · access publish · access resolve · access verify

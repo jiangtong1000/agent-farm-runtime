@@ -191,6 +191,33 @@ has not reported or when the daemon is stale. `events --last N` reads the tail o
 audit log without scanning it; the board uses it.
 See `skills/farm-execution.md` and `examples/five_arm_study/`.
 
+## Human-facing control access
+
+The Master publishes its own control tmux endpoint using `farm --project PROJECT
+access publish`; deployment `session`/`tmux_socket` remain the worker executor's
+endpoint. `farm access resolve` reads an explicitly configured shared registry;
+`farm --project PROJECT access verify` checks the exact current endpoint on its
+recorded host. Neither read command attaches, repairs state or chooses a fallback.
+
+Each target permanently names one farm/root, for example `cluster/study-a` and
+`cluster/study-b` for two farms. Node turnover preserves that binding. Movable
+local aliases and cross-cluster/storage migration are outside remote resolution.
+For access-enabled Slurm deployments, launch `reconcile` with `SLURM_JOB_ID`
+(or `SLURM_JOBID`) and the local `SLURMD_NODENAME`, or the validated explicit
+pair `--slurm-job-id ID --slurm-node NODE`. Startup records a scheduler attestation
+with the exact node, allocation StartTime, UID, runtime host and epoch; inspect it
+through `status --json`. An FQDN runtime host need not equal Slurm's NodeName.
+Claim/recovery clear the previous attestation, so the destination must capture
+fresh launcher inputs. Do not copy old environment values or edit manifest JSON.
+
+Follow the [access runbook](ACCESS_PROTOCOL.md#master-runbook) for bootstrap and
+planned turnover. Claim plus a RUNNING allocation is insufficient: the replacement
+needs a live reconciler's completed tick, a separately created control session,
+and verified publication before current changes. Use commands, never manual edits
+to registry JSON or markers. Source upgrades and recreated control sessions can
+invalidate immutable access records; plan the required epoch transition before
+changing an access-enabled deployment.
+
 ## Board (farmboard)
 
 `farmboard` is a read-only view built from `farm status --json`, `farm events`,

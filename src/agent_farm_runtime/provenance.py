@@ -13,6 +13,18 @@ from .procutil import host_identity
 from .protocol import PROTOCOL_VERSION  # noqa: E402  (protocol/ is the single source)
 
 
+def farm_identity(root: str) -> dict:
+    """Deployment identity at the canonical .farm path (shared across turnover)."""
+    return {"farm_root": root, "farm_id": "farm-" + hashlib.sha256(root.encode()).hexdigest()}
+
+
+def deployment_stamp(manifest: dict) -> dict:
+    """Bind completed heartbeats to the exact daemon, build and execution epoch."""
+    keys = ("farm_id", "farm_root", "execution_epoch", "host", "boot_id", "pid_namespace",
+            "pid", "pid_starttime", "started_at", "source_sha256", "protocol_version", "scheduler_attestation")
+    return {key: manifest.get(key) for key in keys}
+
+
 def runtime_identity() -> dict:
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
@@ -24,7 +36,8 @@ def runtime_identity() -> dict:
             "pid": os.getpid(), **host_identity(),
             "capabilities": ["cas-decisions", "recoverable-audit", "workspace-reservation",
                              "positive-terminal-wait", "pinned-context", "tri-state-liveness",
-                             "bounded-dispatch", "restart-budget", "task-summary", "planned-turnover"]}
+                             "bounded-dispatch", "restart-budget", "task-summary", "planned-turnover",
+                             "control-access-v1"]}
 
 
 def require_compatible_writer(paths, *, policy: str = "compatible",

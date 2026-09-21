@@ -72,6 +72,24 @@ destination and a single-use execution epoch. These are cooperative controls, no
 multi-host consensus or fencing of arbitrary external dispatchers. Provisioning,
 node-expiry policy and scientific job ownership remain outside the runtime.
 
+[Control access schema 1](ACCESS_PROTOCOL.md) is additive to runtime protocol 4.
+It binds a separate Master tmux endpoint to the existing execution epoch and a
+completed daemon tick. Publication and verification require Linux process identity,
+an exact Slurm allocation, launcher-attested scheduler node, owned tmux socket
+and the deployed source. The runtime hostname may be an FQDN while Slurm's
+NodeName is short; these are separate exact facts, never normalized or guessed.
+The access commands support tmux 2.7 without `-N`; observations and the returned
+attach wrapper cannot start a server. A target remains bound to one farm/root.
+Registry and farm storage must be persistent/shared at identical canonical paths;
+the UID must be consistent across execution nodes. A storage attestation and site
+canary are required; a path name cannot establish network filesystem durability.
+Read-only resolution uses no locks or live remote probes and may run on a host
+that can read those paths. Local SSH/Ghostty setup belongs to a later client.
+The access feature has no native Mac/Windows execution or real-site validation
+claim. It never changes task compatibility or treats an unreachable node as dead.
+Cross-cluster or cross-storage relocation requires explicit migration/recovery
+and destination registry provisioning; access resolution cannot perform it.
+
 Prompt size is an executor constraint, not a scientific rule or core decision limit.
 Codex-tmux's default transport ceiling is 98304 UTF-8 bytes, configurable through
 `FARM_CODEX_MAX_PROMPT_BYTES`; it is a ceiling, not a target. Do not raise it beyond

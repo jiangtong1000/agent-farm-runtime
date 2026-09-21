@@ -12,7 +12,7 @@ visible. When results are ready, you discuss them with an independent Reviewer a
 tell the Master what to do next.
 
 <p align="center">
-  <img src="docs/assets/farm-overview.svg" width="800" alt="The Owner talks to the Master, who operates the farm. Workers execute a project-owned research harness through farmkit; the Quest Board shows task records and workspace evidence. Dashed links mark the external harness relationship. An independent Reviewer discusses results with the Owner, who directs the next round.">
+  <img src="docs/assets/farm-overview.svg" alt="Autonomous research, from ideas to evidence. The Owner gives goals, constraints and budget. A Master agent plans, coordinates and supervises parallel research agents whose sessions are disposable. Workers use and improve a versioned research harness, submit jobs to HPC/Slurm, and results flow into a persistent Quest Board. An independent Reviewer reviews together with the Master. The Owner is caught up with results and full context and iterates on new questions.">
 </p>
 
 The Quest Board is rendered by `farmboard` from task records and workspace evidence.
@@ -201,6 +201,19 @@ inspection and decisions. The generated wrapper defaults to actuation off; the
 startup script alone does not enable it. `FARM_ACTUATION_ALLOWED=1` is supplied by
 the Master under the owner's authorization, not something the owner must type.
 
+For Slurm node turnover, the Master can publish its separate human-facing tmux
+endpoint under a farm-specific target such as `cluster/study-a`. Each target is
+permanently bound to one farm/root; other farms use different targets. The access layer keeps
+immutable records on shared storage and requires exact deployment, epoch, job
+and tmux identity checks. `access resolve` returns a candidate; `access verify`
+on the recorded host returns attachment arguments only when all checks pass.
+See the [access protocol and runbook](docs/ACCESS_PROTOCOL.md). A local connection
+client and terminal UI are separate work; these commands do not attach or start
+sessions.
+The deployment records the runtime hostname and exact Slurm node separately,
+using launcher identity captured at reconciler startup. A movable local shorthand
+belongs to the future connection client, not the remote registry.
+
 ## Inspect, review and continue
 
 In that separate shell, the Master activates the same environment and sets
@@ -278,6 +291,8 @@ Package version: **0.4.0**. Runtime protocol: **4**.
   and release restart. Those runs do not establish equivalent coverage for every
   real Codex or Claude session path.
 - The interactive Textual UI has not yet been validated in a real terminal.
+- Control access has isolated unit/fault coverage; real Slurm/tmux and cross-node
+  storage validation remain the [access canary gate](docs/ACCESS_PROTOCOL.md#deployment-and-canary-gate).
 - The protocol package re-exports definitions from other modules; hashing that
   directory alone does not prove format compatibility. The release source digest
   currently covers the runtime package, not the complete three-package bundle.
@@ -298,6 +313,7 @@ calls. See [contributing](CONTRIBUTING.md) for implementation rules and
 ## Documentation
 
 - [Operations](docs/OPERATIONS.md): current commands and procedures for the Master.
+- [Control access](docs/ACCESS_PROTOCOL.md): schema, CLI, bootstrap, turnover and client contract.
 - [Master entrypoint](templates/RUNTIME_MASTER.md): the natural-language delegation workflow.
 - [Design contract](V2_DESIGN.md): retained invariants and the historical runtime baseline.
 - [Lessons](docs/LESSONS.md): failure mechanisms and the regression tests that preserve their fixes.

@@ -301,7 +301,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         observed_this_pass.clear()
         rep = reconciler.reconcile_once()
         report = asdict(rep)
-        write_last_tick(paths, report, observed_jobs=dict(observed_this_pass))
+        write_last_tick(paths, report, observed_jobs=dict(observed_this_pass), deployment=started_deployment)
         # Quiet log in --loop mode (D15): print only ticks that did something, plus an
         # hourly heartbeat. A single explicit pass always prints its full report.
         acted = tick_acted(report)
@@ -315,10 +315,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     try:
         with single_reconciler(paths.runtime):
             from datetime import datetime, timezone
-            from .provenance import require_compatible_writer, require_local_executor_host, runtime_identity
+            from .provenance import farm_identity, require_compatible_writer, require_local_executor_host, runtime_identity
             upgrade = getattr(args, "upgrade_from_source", None)
             from .locking import task_mutation_lock
-            from .turnover import deployment, finish_deployment_event, require_task_writer
+            from .turnover import deployment, execution_epoch, finish_deployment_event, require_task_writer
             with task_mutation_lock(paths.runtime):
                 # Serialize startup checks/manifest publication with drain and
                 # master commits, before initializing any executor.
@@ -334,6 +334,15 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                 if previous.get("handoff") and any(previous.get(k) != getattr(args, k)
                                                    for k in ("executor", "session", "tmux_socket")):
                     raise StoreError("handoff requires unchanged executor/session/socket configuration")
+                from .access.allocation import capture_allocation
+                from .access.contract import AccessError
+                current = runtime_identity()
+                epoch = execution_epoch(previous)
+                try:
+                    scheduler_attestation = capture_allocation(
+                        previous, current, epoch, job_id=args.slurm_job_id, node=args.slurm_node)
+                except AccessError as exc:
+                    raise StoreError(f"{exc.state}: {exc}") from exc
                 executor = _executor(paths, args.executor, args.session, args.tmux_socket)
                 unblock = None
                 observed_this_pass: dict[str, str | None] = {}
@@ -349,8 +358,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                 reconciler = Reconciler(paths, executor, grace_seconds=args.grace_seconds, unblock=unblock,
                                         max_auto_restarts=args.max_auto_restarts)
                 from .procutil import proc_starttime
-                atomic_write_json(paths.runtime / "deployment.json", {
-                    **previous, **runtime_identity(), "started_at": datetime.now(timezone.utc).isoformat(),
+                started_deployment = {
+                    **previous, **current, "started_at": datetime.now(timezone.utc).isoformat(),
+                    **farm_identity(str(paths.root.resolve())), "execution_epoch": epoch,
+                    "scheduler_attestation": scheduler_attestation,
                     "pid_starttime": proc_starttime(os.getpid()),
                     **({"upgraded_from_source": upgrade} if upgrade is not None else {}),
                     "executor": args.executor, "session": args.session,
@@ -358,7 +369,8 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     "loop": args.loop, "writer_policy": args.writer_policy,
                     "grace_seconds": args.grace_seconds, "interval": args.interval,
                     "max_auto_restarts": args.max_auto_restarts,
-                })
+                }
+                atomic_write_json(paths.runtime / "deployment.json", started_deployment)
             if not args.loop:
                 one_pass()
                 return 0
@@ -406,6 +418,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--writer-policy", choices=["compatible", "pinned-host"], default="compatible",
                         help="protocol compatibility, or opt-in same-host/source pinning for a deployment")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    from .access.cli import add_parser as add_access_parser
+    add_access_parser(sub)
 
     p = sub.add_parser("init", help="initialize project-local durable farm state")
     p.set_defaults(func=cmd_init)
@@ -497,6 +512,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan-only", action="store_true", help="validate and print the command without stopping")
     p.set_defaults(func=cmd_restart)
     p = sub.add_parser("reconcile", help="run the actuating control loop")
+    p.add_argument("--slurm-job-id", help="launcher-attested allocation ID; pair with --slurm-node (otherwise use Slurm environment)")
+    p.add_argument("--slurm-node", help="exact local Slurm NodeName, not a derived hostname; pair with --slurm-job-id")
     p.add_argument("--upgrade-from-source", metavar="SHA256",
                    help="explicit same-host/protocol source upgrade from this recorded digest; requires pinned-host and stopped writers")
     p.add_argument("--executor", choices=list(EXECUTOR_NAMES),

@@ -478,3 +478,35 @@ def test_local_process_worker_is_reaped_not_zombied(tmp_path):
         stat = Path(f"/proc/{pid}/stat").read_text()
         state = stat[stat.rindex(")") + 2]
         assert state != "Z", "exited worker left as a zombie"
+
+
+def test_local_process_reaps_worker_exiting_during_observation(tmp_path, monkeypatch):
+    """Force exit after any initial reap but before the liveness observation."""
+    import signal
+    from agent_farm_runtime.adapters import local_process
+
+    paths = _paths(tmp_path)
+    ex = LocalProcessExecutor(paths.runtime)
+    ex.launch(_ready_task(command="exec sleep 60"), Lease("W-race", "L-race"))
+    pid, _ = ex._identity("W-race")
+    assert pid is not None
+    observe = local_process.observe_pidfile
+
+    def exit_before_observation(*args):
+        os.kill(pid, signal.SIGKILL)
+        # Wait for exit without reaping: poll must collect the zombie itself.
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        return observe(*args)
+
+    monkeypatch.setattr(local_process, "observe_pidfile", exit_before_observation)
+    try:
+        assert ex.poll("W-race").alive is False
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+    finally:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == 0:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass

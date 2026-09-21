@@ -93,6 +93,7 @@ def _prepare(plan: dict, actor: str, evidence: dict) -> dict:
     after.pop("handoff", None)
     after.pop("pending_event", None)
     after["execution_epoch"] = recovery_id
+    after["scheduler_attestation"] = None  # New epoch needs fresh launcher evidence.
     return {"id": recovery_id, "plan": plan, "changes": changes, "after": after,
             "actor": actor, "evidence": evidence, "ts": ts}
 
