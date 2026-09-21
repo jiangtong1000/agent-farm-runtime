@@ -81,8 +81,11 @@ NodeName is short; these are separate exact facts, never normalized or guessed.
 The access commands support tmux 2.7 without `-N`; observations and the returned
 attach wrapper cannot start a server. A target remains bound to one farm/root.
 Registry and farm storage must be persistent/shared at identical canonical paths;
-the UID must be consistent across execution nodes. A storage attestation and site
-canary are required; a path name cannot establish network filesystem durability.
+the UID must be consistent across execution nodes. A storage attestation is
+required; a path name cannot establish network filesystem durability. Site
+validation may proceed in stages on the actual farm under the Owner's authorization,
+with cross-node checks at planned turnover; a separate disposable canary is optional.
+See the [staged validation procedure](ACCESS_PROTOCOL.md#deployment-and-staged-validation).
 Read-only resolution uses no locks or live remote probes and may run on a host
 that can read those paths. Local SSH/Ghostty setup belongs to a later client.
 The access feature has no native Mac/Windows execution or real-site validation

@@ -354,10 +354,19 @@ locking. This is not protection against a malicious account sharing that UID.
 
 ### Initial bootstrap
 
-1. Provision a disposable or approved farm, the pinned release/wrapper and shared
+The Owner may authorize staged validation directly on this farm. Record that
+choice in its operating notes and proceed under that authorization; a separate
+disposable canary is not required. Follow the
+[staged validation procedure](#deployment-and-staged-validation), retaining the
+protocol's publication and verification checks.
+
+1. Prepare the approved farm, the pinned release/wrapper and shared
    storage using [deployment setup](../README.md#configure-and-start-a-deployment).
-   Verify common canonical paths, consistent UID, cross-node flock, file/directory
-   fsync and rename semantics. Provision the registry parent, then run
+   Establish that the storage is persistent/shared and supports flock,
+   file/directory fsync and atomic rename, using site evidence and checks appropriate
+   to the current stage. Confirm paths and UID on the current host; cross-node
+   visibility and lock exclusion are checked at planned turnover. Provision the
+   registry parent, then run
    `farm access init --registry /shared/farm-access --attest-shared-storage`.
    Do not place the registry or `.farm` on node-local scratch.
 2. Through the separate site workflow, obtain the authorized Slurm allocation.
@@ -471,7 +480,9 @@ is required if resolution runs remotely. SSH aliases, credentials, ControlMaster
 Ghostty, routing and tmux UI preferences belong to that client/site configuration.
 This repository provides neither that client nor unattended reconnection.
 
-## Deployment and canary gate
+<a id="deployment-and-canary-gate"></a>
+
+## Deployment and staged validation
 
 No real scheduler/session or site deployment is required by the unit suite.
 Access fault tests use synthetic deployment/Slurm/tmux observations and temporary
@@ -505,32 +516,53 @@ tests/test_access_allocation.py tests/test_access_observations.py
 tests/test_portability.py`. To run just the disposable tmux checks, retain the
 flag and append `tests/test_access_tmux_canary.py`.
 
-Before production adoption, with separate authorization:
+### Staged validation on the actual farm
 
-1. Export the reviewed commit, retain the prior wrapper/release and create an
-   isolated shared registry and empty canary farm. Do not reuse a production
-   target. Check the storage and exact Slurm/tmux command contracts on the site.
-2. On an explicitly provisioned allocation, start an empty reconciler and a
-   disposable control session. Confirm actual launcher job ID and local NodeName,
-   separate runtime hostname, UID, RUNNING state and UTC StartTime against
-   `scontrol` and the startup attestation. Include a real FQDN/short-name pair
-   and, where available, a multi-node allocation whose other nodes are never
-   selected. Publish/resolve/verify; try a wrong session,
-   socket and window, an incorrect job ID, a simulated observation timeout, and
-   concurrent identical/conflicting publishes. Every refusal must omit attach.
-3. With two authorized overlapping allocations, complete normal drain, release,
-   claim and readiness. Confirm the old pointer persists until verified publish,
-   remains unusable after claim, and both immutable epoch files remain afterward.
-   Confirm claim clears the old attestation, the destination captures its own
-   job/node identity, and stale launcher input or a requeued StartTime is refused.
-   Repeat a crash after the instance write in the disposable registry, then retry
-   the identical publication. Check visibility and lock exclusion from both nodes.
-4. Preserve JSON outputs and task/event snapshots, verify that reads changed no
-   task state, and review the evidence before enabling a production target or a
-   Mac client. No test should kill, submit or cancel an unrelated allocation.
+The Owner can authorize validation as part of normal operation on the real farm.
+This is a supported deployment path; a separate disposable farm or completion of
+all turnover/fault scenarios is not a prerequisite for publishing a real target.
+Record the chosen approach and existing authorization in the farm's operating
+notes. Continue through the authorized stages without requesting that permission
+again. An unexercised scenario is recorded as such; it is not a failed check.
 
-If the canary fails, stop access adoption and retain its records. Removing a
-client's use of the target is sufficient to stop reconnection attempts; access
-owns no background service. Runtime rollback follows the existing stopped-writer
-procedure and does not rewrite access history. Do not automatically repoint an
-existing target to an older generation.
+1. **Prepare the actual deployment.** Pin the release/wrapper, preserve existing
+   deployment records if any, and establish the persistent/shared storage facts
+   needed for registry initialization. Use this farm's real target, canonical root,
+   allocation and explicitly chosen control endpoint. Inspect an existing farm
+   before acting; staged validation does not mean reinitializing it. Use separate
+   scratch files for filesystem probes, never live lock or registry files.
+2. **Publish and verify current access.** On the recorded host, confirm the fresh
+   completed reconciler tick and scheduler attestation. Check the exact job ID,
+   local scheduler node, runtime hostname, UID, RUNNING state and StartTime through
+   the protocol. Use the existing intended Master session, or create it as part of
+   authorized initial setup. Do not recreate an already bound endpoint for a test.
+   Run `access publish`, `access resolve` and `access verify --expected-record
+   DIGEST`, retaining their JSON evidence. A `VERIFIED` result permits current
+   access; a failure retains the protocol's fail-closed behavior. No prior
+   disposable publication or completed node turnover is needed.
+3. **Observe normal work.** Exercise a small agreed task or setup smoke test on
+   this farm. Check worker execution, receipts, task/board evidence and Master
+   notifications. Expand to the already authorized work as the relevant checks
+   pass. Keep a short record of what was observed and what remains unexercised;
+   fault injection and full turnover coverage do not block ordinary operation.
+4. **Validate turnover when it is needed.** Follow the planned handoff procedure
+   with the real source and destination allocations. Confirm common canonical
+   paths, consistent UID, cross-node visibility and lock exclusion before claim.
+   Confirm the old pointer remains until verified publication, the new epoch gets
+   fresh job/node attestation and readiness, and old epoch records remain present
+   without being selected. Capture the normal drain/release/claim/publication
+   evidence. Until this stage occurs, report turnover as unexercised rather than
+   claiming that current access proves it.
+
+Crash injection, deliberately conflicting publications and artificial session or
+allocation failures belong in the existing mock/private-socket tests or an optional
+isolated canary. Staged validation does not require inducing these failures on the
+working farm. A separate canary remains available if the Owner chooses that route.
+
+If publication or verification fails, retain the evidence and withhold attachment
+as the protocol requires; inspect the actual prerequisite before retrying. Do not
+edit identity records, weaken checks or fall back to an older endpoint. This access
+failure does not itself authorize stopping unrelated workers or scientific jobs.
+Runtime rollback, if needed, follows the existing stopped-writer procedure and
+does not rewrite access history. Access owns no background service, and this
+validation procedure does not add a Mac client.

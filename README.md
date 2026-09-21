@@ -316,8 +316,9 @@ Package version: **0.4.0**. Runtime protocol: **4**.
   and release restart. Those runs do not establish equivalent coverage for every
   real Codex or Claude session path.
 - The interactive Textual UI has not yet been validated in a real terminal.
-- Control access has isolated unit/fault coverage; real Slurm/tmux and cross-node
-  storage validation remain the [access canary gate](docs/ACCESS_PROTOCOL.md#deployment-and-canary-gate).
+- Control access has isolated unit/fault coverage. Site evidence can be gathered
+  through [staged validation on the actual farm](docs/ACCESS_PROTOCOL.md#deployment-and-staged-validation)
+  under the Owner's authorization; a separate disposable farm is optional.
 - The protocol package re-exports definitions from other modules; hashing that
   directory alone does not prove format compatibility. The release source digest
   currently covers the runtime package, not the complete three-package bundle.

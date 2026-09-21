@@ -42,10 +42,14 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
   it does not require a scientific objective. Verify that background `farmkit watch`
   completion notifies this Master and permits it to continue; tmux alone does not
   provide model wakeups. Report what is ready and discuss research with the Owner.
-- Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and
-  complete its site canary before enabling a production target. Report deployment
-  identity, what was verified, current work and any remaining limits. Continue
-  within the existing authority without requesting routine setup approvals again.
+- Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and use
+  the Owner's chosen validation approach. Staged validation on the actual farm is
+  supported; a separate disposable canary is not a prerequisite. Record that choice
+  in this farm's operating notes and proceed under the existing authorization.
+  Publish the real target once the protocol's identity and readiness checks pass;
+  validate further operation and turnover as those stages occur. Report deployment
+  identity, what was verified, current work and checks not yet exercised. Do not
+  request the same authorization again or bypass a failed protocol check.
 
 ## Research and resource use
 
