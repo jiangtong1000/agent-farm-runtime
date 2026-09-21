@@ -12,17 +12,20 @@ from pathlib import Path
 from .adapters.filesystem import atomic_write_json
 from .models import TaskState
 from .procutil import host_identity
-from .provenance import runtime_identity
+from .provenance import deployment_stamp, runtime_identity
 from .store import FarmPaths, TaskStore
 
 
-def write_last_tick(paths: FarmPaths, report: dict, observed_jobs: dict[str, str | None] | None = None) -> None:
+def write_last_tick(paths: FarmPaths, report: dict, observed_jobs: dict[str, str | None] | None = None,
+                    *, deployment: dict | None = None) -> None:
     """Heartbeat of the control loop, independent of log verbosity (D33). `observed_jobs`
     are the scheduler states the daemon itself saw this pass: status, watch and the board
-    read them instead of each querying Slurm again (D28/D29)."""
+    read them instead of each querying Slurm again (D28/D29). The daemon supplies
+    its startup identity; reading a newer manifest cannot certify another daemon."""
     counts = {key: len(value) for key, value in report.items() if isinstance(value, list)}
     atomic_write_json(paths.runtime / "last_tick.json",
                       {"ts": datetime.now(timezone.utc).isoformat(), "counts": counts,
+                       **({"deployment": deployment_stamp(deployment)} if deployment is not None else {}),
                        **({"observed_jobs": observed_jobs} if observed_jobs is not None else {})})
 
 
@@ -94,6 +97,8 @@ def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) ->
     deployment = None
     if manifest:
         deployment = {
+            "farm_id": manifest.get("farm_id"), "farm_root": manifest.get("farm_root"),
+            "execution_epoch": manifest.get("execution_epoch"),
             "host": manifest.get("host"), "pid": manifest.get("pid"),
             "started_at": manifest.get("started_at"), "protocol_version": manifest.get("protocol_version"),
             "source_root": manifest.get("source_root"), "source_sha256": manifest.get("source_sha256"),

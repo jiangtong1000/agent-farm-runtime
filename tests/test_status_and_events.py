@@ -114,7 +114,9 @@ def test_single_pass_prints_full_report_but_loop_is_quiet(tmp_path, monkeypatch,
     assert json.loads(out)["launched"] == []                 # single pass: full report
     assert (paths.runtime / "last_tick.json").exists()       # heartbeat file written (D33)
     tick = json.loads((paths.runtime / "last_tick.json").read_text())
-    assert set(tick) == {"ts", "counts", "observed_jobs"} and tick["counts"]["launched"] == 0
+    assert set(tick) == {"ts", "counts", "observed_jobs", "deployment"} and tick["counts"]["launched"] == 0
+    assert tick["deployment"]["execution_epoch"] == "initial"
+    assert tick["deployment"]["pid"] == json.loads((paths.runtime / "deployment.json").read_text())["pid"]
 
 
 def test_status_cli_flag(tmp_path, capsys):

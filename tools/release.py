@@ -60,7 +60,8 @@ if args.writer_policy != "pinned-host":
 if args.command == "reconcile" and activation != "1":
     print("farm: activation is OFF; owner-authorized recovery requires FARM_ACTUATION_ALLOWED=1", file=sys.stderr)
     sys.exit(78)
-if args.command not in {read_only}:
+access_read = args.command == "access" and args.access_action in ("resolve", "verify")
+if args.command not in {read_only} and not access_read:
     expected = "{sha}"
     if runtime_identity()["source_sha256"] != expected:
         print("farm: pinned source changed; refusing writes until release is reviewed", file=sys.stderr)
