@@ -12,7 +12,7 @@ visible. When results are ready, you discuss them with an independent Reviewer a
 tell the Master what to do next.
 
 <p align="center">
-  <img src="docs/assets/farm-overview.svg" width="800" alt="The Owner talks to the Master, who operates the farm. Workers execute a project-owned research harness through farmkit; the Quest Board shows task records and workspace evidence. Dashed links mark the external harness relationship. An independent Reviewer discusses results with the Owner, who directs the next round.">
+  <img src="docs/assets/farm-overview.svg" alt="Autonomous research, from ideas to evidence. The Owner gives goals, constraints and budget. A Master agent plans, coordinates and supervises parallel research agents whose sessions are disposable. Workers use and improve a versioned research harness, submit jobs to HPC/Slurm, and results flow into a persistent Quest Board. An independent Reviewer reviews together with the Master. The Owner is caught up with results and full context and iterates on new questions.">
 </p>
 
 The Quest Board is rendered by `farmboard` from task records and workspace evidence.
