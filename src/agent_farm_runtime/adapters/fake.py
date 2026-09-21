@@ -18,7 +18,6 @@ class FakeExecutor:
         self.stopped: list[str] = []
         self._alive: dict[str, bool] = {}
         self._receipt: dict[str, Receipt] = {}
-        self._task: dict[str, str] = {}
 
     # WorkerExecutor protocol -------------------------------------------------
 
@@ -26,7 +25,6 @@ class FakeExecutor:
         wid = lease.worker_id
         self.launched.append((wid, task.id))
         self._alive[wid] = True
-        self._task[wid] = task.id
         return LaunchHandle(worker_id=wid, session_handle=f"fake:{wid}")
 
     def resume(self, task: Task, worker_id: str, lease: Lease) -> None:

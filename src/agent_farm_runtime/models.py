@@ -118,6 +118,8 @@ class Receipt:
     ts: str
     note: str = ""
     waiting_on: str | None = None
+    rotation_id: str | None = None
+    checkpoint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

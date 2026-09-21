@@ -1,200 +1,310 @@
 # agent-farm-runtime
 
-A small, portable runtime for durable-state-driven research agent farms.
+You start a set of experiments and step away. By the time you return, some jobs have
+finished, one needs a code fix, and an agent session has ended. Before the research
+can move forward, someone has to reconstruct what ran, which outputs passed their
+checks, and what still needs your decision.
 
-The runtime separates **scientific decisions** from **mechanical orchestration**:
+agent-farm-runtime exists to make that handoff reliable. You discuss the research
+with a Master agent in natural language. The Master sets up and supervises the farm,
+workers execute the approved plan, and a Quest Board keeps progress and evidence
+visible. When results are ready, you discuss them with an independent Reviewer and
+tell the Master what to do next.
 
-- **Claude Master**: decomposes tasks, sets acceptance criteria, makes scientific rulings, synthesizes results.
-- **Reconciler**: deterministic control loop; no scientific judgment.
-- **Workers**: disposable executors (Codex first, other backends later).
-- **Task Store**: the single authoritative current state.
-- **Worker Registry**: observed operational state; repairable, not authoritative.
-- **Event Log**: append-only audit history.
+<p align="center">
+  <img src="docs/assets/farm-overview.svg" width="800" alt="The Owner talks to the Master, who operates the farm. Workers execute a project-owned research harness through farmkit; the Quest Board shows task records and workspace evidence. Dashed links mark the external harness relationship. An independent Reviewer discusses results with the Owner, who directs the next round.">
+</p>
 
-The design is derived from real failure modes in a live SSH/tmux/SLURM agent farm. The frozen contract lives in [`V2_DESIGN.md`](V2_DESIGN.md).
+The Quest Board is rendered by `farmboard` from task records and workspace evidence.
+The research harness lives in a separate project repository and supplies the methods,
+scripts and scientific checks used by the Master and Workers. Dashed links show
+execution through `farmkit` and inspection of evidence in the project workspace.
 
-## Current status
+The Owner's interface is the conversation. The Master runs the commands for setup,
+supervision and execution within the authority you give it; you do not need to type
+`farm`, `farmkit` or `farmboard` commands. Reviewer feedback reaches you first and
+does not automatically trigger another research round.
 
-**v0.3 — actuation implemented and validated by real-codex canaries.** The
-contract in [`V2_DESIGN.md`](V2_DESIGN.md) is aligned to the code (§10 maps every
-invariant to its implementation). The next phase is running an isolated canary
-farm, not more feature development.
+**Task state is durable; agents and sessions are disposable.**
 
-Foundation:
+The repository combines three Python packages: `agent_farm_runtime` for task
+orchestration, `farmkit` for execution inside a task, and `farmboard` for inspection.
+It is designed for a single-owner research farm on Linux, with local commands or
+Slurm jobs and optional Codex or Claude Code workers in tmux.
 
-- task / worker / event models; atomic durable task storage;
-- legal lifecycle validation; lease/fencing validation;
-- invariant checks (`farm doctor`); read-only shadow observations (`farm shadow`);
-- cluster/project templates; regression tests for the invariants.
+## How a farm works
 
-Actuation — the control loop that drives disposable workers:
+| Role | Responsibility |
+|---|---|
+| Owner | Defines goals, budgets and approval boundaries in natural language; discusses independent review and authorizes the next step. |
+| Master agent | Sets up and operates the farm under that authority, turns the plan into task contracts, monitors progress, handles permitted code fixes, and records the owner's decisions. |
+| Reconciler daemon | Dispatches workers, applies lease-bound receipts, observes waiting conditions, and resumes eligible tasks. |
+| Worker | Runs `farmkit tick`, reads its summary, executes the receipt command it prints, and exits until the next wake. |
+| Independent reviewer | Reads deliverables and evidence and discusses them with the owner. Review advice does not automatically change task state. |
 
-- `Reconciler.reconcile_once` — one serialized, idempotent pass (INV-6) that
-  actuates `READY` tasks, applies fenced worker receipts, adopts crashed
-  workers, resumes unblocked `WAITING` tasks, and repairs the observed registry;
-- **crash-consistency** (INV-9): the authoritative RUNNING+lease is persisted
-  BEFORE any launch, and on adoption new ownership is committed BEFORE the stale
-  generation is stopped — so a reconciler crash never double-actuates or orphans
-  a task; launch is idempotent per lease;
-- **grace policy** (INV-10): a lease is rotated off a worker only when it is
-  *durably* dead (no receipt and no heartbeat within `--grace-seconds`) — a
-  single transient liveness miss never revokes a live worker's lease (INV-5);
-- **stable worker identity** (INV-11): liveness is a recorded `(pid, starttime)`
-  set at launch AND refreshed identically on resume — never a workspace-wide
-  process scan; a recycled pid or a resumed worker's dead original is never
-  mistaken for the live worker;
-- **single-reconciler lock** (`locking.single_reconciler`, flock, INV-6);
-- one authoritative-mutation boundary (INV-7): every state transition AND lease
-  acquire/rotate/release goes through a durable-write + event;
-- structured, atomically-written **receipt** primitive
-  (`RUNNING`/`AWAITING`/`SUBMITTED`/`FAILED`), fenced by `lease_id`;
-- **lease rotation** (`rotate_lease`) — the "adopt a stopped task" primitive,
-  ratified into the v0.3 contract; requires a `reason` establishing death and
-  can never rotate off a possibly-live holder;
-- **one active task per workspace** (INV-12): `doctor` FAILs on two active tasks
-  sharing a workspace;
-- `WorkerExecutor` backends: `FakeExecutor` (tests), `LocalProcessExecutor` (real
-  subprocesses), and **`CodexTmuxExecutor`** (real codex workers in a dedicated,
-  isolated tmux server; cluster specifics in `CodexClusterConfig`);
-- `farm reconcile [--executor codex-tmux] [--loop]` CLI.
+These are workflow roles, not access-control identities. Both the runtime CLI and
+the reconciler perform supported writes to `.farm/`; agents do not edit those files
+by hand. Scientific code and project-specific checks live in the task workspace.
 
-A worker never drives `DONE`: `DONE` still requires recorded acceptance, a
-master/harness judgment (Layer-1/Layer-2 boundary).
+The usual lifecycle is:
 
-## Design rule
-
-> Task state is durable; agents and sessions are disposable.
-
-The intended lifecycle is:
-
-```text
-READY → RUNNING ↔ WAITING → SUBMITTED → DONE
-                  │              │
-                  └→ BLOCKED     └→ RUNNING (revision)
-
-any → FAILED
+```mermaid
+stateDiagram-v2
+    READY --> RUNNING
+    RUNNING --> WAITING
+    WAITING --> RUNNING
+    RUNNING --> SUBMITTED
+    SUBMITTED --> RUNNING: rework
+    SUBMITTED --> DONE: accept
 ```
 
-`WAITING` means there is a named normal-path unblock condition (`job:...`, `task:...`, `artifact:...`, `ruling:...`). `SUBMITTED` is reserved for the final acceptance handoff.
+`WAITING` names a condition such as `job:<id>`, `task:<id>`, `artifact:<path>`, or
+`ruling:<name>`. `SUBMITTED` means ready for acceptance; `task-accept` records the
+decision and moves it to `DONE`. Nonterminal tasks can also be blocked or fail;
+`DONE` and `FAILED` are terminal. See the [lifecycle contract](V2_DESIGN.md) for the
+full state machine.
 
-## Quick start
+## Packages and boundaries
 
-Requires Python 3.11+ and no runtime third-party dependencies.
+| Package | What it owns |
+|---|---|
+| `agent_farm_runtime` | Task store, leases, receipts, worker identity, executors, audit events, stop/restart and recovery. |
+| `farmkit` | Step expansion, attempt ledger, code snapshots, submission intents, job observation, verification, failure evidence and bounded retries; master-side `watch` and `health`. |
+| `farmboard` | A shared display model for text, static HTML and the optional Textual TUI. |
+
+farmkit queries runtime state through the configured `farm` CLI. The board combines
+those queries with workspace evidence. Its viewing operations are read-only;
+interactive actions preview a CLI command and run it after confirmation. The board
+does not maintain a second task database.
+
+## Install and inspect a task
+
+The following sections are command references for the Master and contributors.
+As an Owner, you can instead ask: "Set up a farm for this project, run the approved
+comparisons within this budget, and bring the results back for review."
+
+From a checkout of the chosen revision, the Master prepares the environment:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install .
 
-# initialize a project-local durable state directory
-cd /path/to/your/research-project
-farm init
-
-# inspect state and invariants
-farm status
-farm doctor
-
-# create a task contract
-farm task-create \
-  --objective "Task A objective" \
-  --deliverable "artifacts/task-a/result.md" \
-  --acceptance "Result is reproducible and passes registered checks"
-
-farm task-list
+farm --project ./demo-farm init
+farm --project ./demo-farm task-create --id T-1 \
+  --objective "Evaluate a research method against a fixed baseline" \
+  --deliverable "A reproducible result and comparison report" \
+  --acceptance "Declared checks pass and the result is reviewed"
+farm --project ./demo-farm status
+farm --project ./demo-farm task-show T-1 --summary
+farm --project ./demo-farm doctor
 ```
 
-### Read-only shadow observation
+This creates and inspects a task contract. It does not start an agent or submit a
+job. Runtime and farmkit require Python 3.11+ and use the standard library.
+The execution backend requires Linux and POSIX filesystem operations; tmux workers
+also need tmux, bash 4.4+, and the chosen agent CLI configured on the worker host.
+Slurm steps require scheduler access. See [portability](docs/PORTABILITY.md).
 
-On a Linux cluster, shadow mode can inspect existing workspaces without modifying them:
+For the interactive board, install the optional dependency from the same revision:
 
 ```bash
-farm shadow /path/to/existing/workspaces
+python -m pip install ".[board]"
 ```
 
-It only uses explicit facts that already exist: process liveness, `.awaiting` contents, referenced artifacts, and SLURM status when available. It never uses file mtimes to infer control state.
+## Prepare a research workspace
 
-## Project-local layout
+Start with [five_arm_study](examples/five_arm_study/README.md). It includes:
 
-`farm init` creates:
+- `BRIEF.md`: goal, boundaries, selected reading and the worker's method.
+- `steps.toml`: commands, dependencies, input/output paths, matrix arms, chains,
+  snapshot patterns and retry budgets.
+- Scientific scripts and an optional `verifiers.py` module for project checks.
+
+Validate the supplied example without launching computation:
+
+```bash
+farmkit brief lint examples/five_arm_study/BRIEF.md
+farmkit steps check --workspace examples/five_arm_study --verifiers verifiers
+```
+
+When a step declares `verify`, pass the module that supplies that function to both
+`steps check` and `tick`. The first declared output is the main JSON artifact and
+must record the actual attempt ID, for example from Python:
+
+```python
+import os
+
+{"provenance": {"attempt_id": os.environ["FARMKIT_ATTEMPT_ID"]}}
+```
+
+Each worker wake follows the [execution guide](skills/farm-execution.md):
+
+```bash
+farmkit tick --workspace /absolute/path/to/workspace --checkpoint --verifiers verifiers
+# Read the summary, run the exact receipt command it prints, then exit.
+```
+
+tick snapshots declared code, records intent before `sbatch`, checks completed
+attempts, and starts steps whose dependencies are satisfied. It prints the receipt
+command; it does not execute that command or write runtime task state itself.
+Generic checks establish attempt identity, required outputs and finite metrics.
+Project verifiers can add scientific checks; final acceptance remains a recorded
+decision by an authorized person or agent.
+
+## Configure and start a deployment
+
+Use a fixed release for a running farm. Copy [sites/example.toml](sites/example.toml)
+to your own configuration directory and fill in interpreter paths, agent commands,
+host matching and scheduler settings. Set `FARMKIT_SITE` to that file, or use its
+hostname rule for automatic discovery. Ensure `farmkit`, the science environment
+and scheduler commands are available in the worker's shell.
+
+The following paths are examples to replace for your site. Create the farm directory
+before rendering its startup script. Set `release_dir` to the exact directory printed
+by `export`:
+
+```bash
+export FARMKIT_SITE="$HOME/.config/agent-farm/sites/mycluster.toml"
+farm_project="/shared/farms/F1"
+farm_wrapper="/shared/farms/bin/farm"
+mkdir -p "$farm_project"
+
+python tools/release.py export --src src --tag 0.4.0 --releases-root /shared/releases
+release_dir="/shared/releases/agent-farm-0.4.0-REPLACE_WITH_DIGEST"
+python tools/release.py wrapper --site "$FARMKIT_SITE" \
+  --release "$release_dir" --out /shared/farms/bin --farm "$farm_project"
+
+"$farm_wrapper" --project "$farm_project" init
+"$farm_wrapper" --project "$farm_project" task-create --id T-1 \
+  --objective "Your research objective" --deliverable "Your deliverable" \
+  --acceptance "Your acceptance criteria" \
+  --workspace /absolute/path/to/workspace \
+  --brief-file /absolute/path/to/workspace/BRIEF.md --executor codex-tmux
+```
+
+Use this explicit wrapper for farm commands, and configure `paths.farm_wrapper` in
+the site profile for watch/health/board. Install farmkit and farmboard from the same
+chosen revision; exporting a release does not install their CLI entry points.
+Review the agent command's permissions in your site profile: headless workers may
+run without interactive approval, and the runtime does not sandbox scientific code.
+
+On the designated farm host, the Master starts the loop as part of the owner's
+authorized setup or restart request:
+
+```bash
+FARM_ACTUATION_ALLOWED=1 "$farm_project/run_reconciler.sh"
+```
+
+The Master keeps the loop in its dedicated session and uses a separate shell for
+inspection and decisions. The generated wrapper defaults to actuation off; the
+startup script alone does not enable it. `FARM_ACTUATION_ALLOWED=1` is supplied by
+the Master under the owner's authorization, not something the owner must type.
+
+## Inspect, review and continue
+
+In that separate shell, the Master activates the same environment and sets
+`farm_project` and `farm_wrapper` to the deployment paths used above.
+
+```bash
+farmboard --project "$farm_project" --farm-wrapper "$farm_wrapper" --once
+# Omit --once for the Textual TUI, or use --html board.html for a static page.
+farmkit watch --project "$farm_project" --farm-wrapper "$farm_wrapper"
+```
+
+watch returns when a task is submitted, needs a ruling, or the daemon needs attention.
+After handling a notification, run `farmkit watch --project "$farm_project" --ack
+CURSOR` in the same master working directory, using the printed cursor. watch only
+returns a notification; continued model activity requires an agent host that can
+notify the master about background command completion. It does not start a master
+session itself.
+
+Review a SUBMITTED task using [REVIEW.md](templates/REVIEW.md), then record acceptance
+or rework with the task's current revision and an evidence file. Read the full
+contract and results before accepting. An independent reviewer can report to the
+owner, who then directs the master to record the decision.
+
+There are two distinct actions after a parked step: `farm task-ruling` records the
+instruction and permits the worker to wake; the worker follows that instruction
+with `farmkit release --step STEP --ruling 'decision and reason'` before ticking
+again. Waking the worker alone does not release its parked attempt.
+
+By default, an infrastructure failure gets one automatic retry. Code failures park
+for the master; science, budget, exhausted infrastructure retries and owner holds
+require the owner's decision under the supplied workflow. The task's explicit
+retry settings determine the execution budget.
+
+For command examples covering acceptance, rework, drain/stop, upgrade and context
+rotation, see [operations](docs/OPERATIONS.md). `restart --to` validates the target,
+stops the daemon and prints the startup command for the new wrapper; it does not
+start the replacement daemon. Do not edit source underneath a running deployment.
+
+## Persistence and recovery
 
 ```text
-.farm/
-├── tasks/       # authoritative task JSON
-├── workers/     # observed worker JSON
-├── events/      # append-only audit JSONL
-├── decisions/   # durable rulings/acceptance records (representation provisional)
-└── runtime/     # locks / local runtime metadata
+<farm>/.farm/
+  tasks/                 authoritative task records
+  workers/               observed worker records
+  events/                append-only audit history
+  runtime/               deployment, locks, receipts and last tick
+
+<workspace>/
+  BRIEF.md, steps.toml    task instructions and step definitions
+  CHECKPOINT.md          mechanical progress plus the agent's judgment
+  REVIEW.md              review evidence, when prepared
+  attempts/<id>.json     execution record
+  attempts/<id>/code/    code snapshot and execution directory
+  attempts/<id>/FAILURE.md
 ```
 
-Runtime code belongs here; scientific project context remains in the project repository.
+The runtime persists ownership before dispatch and rejects stale receipts. Unknown
+process or scheduler state is not treated as proof of death or completion. Submission
+intents let a later tick reconcile an uncertain job ID without blindly submitting again.
 
-## Portability model
+Only code matched by `snapshot` is frozen. Inputs may be links to mutable files;
+projects must specify their input versions and environment. Declared outputs are
+written in the attempt directory and published after verification. In an `afterok`
+chain, use relative run-directory paths to consume the producer attempt; the
+workspace copy may still be the previous verified result.
 
-```text
-agent-farm-runtime
-       │
-       ├── project A/.farm
-       ├── project B/.farm
-       └── project C/.farm
-```
+## Validation and current limits
 
-Cluster-specific behavior belongs behind adapters. The core task semantics should not know whether it is running on Harvard FASRC, Anvil, Delta, or another SLURM cluster.
+Package version: **0.4.0**. Runtime protocol: **4**.
 
-## What is deliberately deferred
+- The local regression run at `e6c1ebd` reported **406 passed, 2 skipped**. The suite
+  includes unit tests, fault replays and integration tests with a fake scheduler.
+- [LESSONS.md](docs/LESSONS.md) records real-Slurm scratch canaries using a
+  **local-process worker**, including wait/resume, submission, acceptance, drain
+  and release restart. Those runs do not establish equivalent coverage for every
+  real Codex or Claude session path.
+- The interactive Textual UI has not yet been validated in a real terminal.
+- The protocol package re-exports definitions from other modules; hashing that
+  directory alone does not prove format compatibility. The release source digest
+  currently covers the runtime package, not the complete three-package bundle.
+- Shared filesystem behavior and execution environments need site validation.
+  See [compatibility](docs/COMPATIBILITY.md) and [portability](docs/PORTABILITY.md).
 
-- WAITING-condition observers (`job:`/`artifact:`/`task:`/`ruling:` predicates):
-  the reconciler resumes on an injected `unblock` predicate; the observers that
-  evaluate those conditions are the next build item;
-- enforcement of leases against live *non-cooperative* workers (fencing today
-  assumes workers echo their `lease_id`);
-- SLURM job submission/cancellation;
-- automatic scientific acceptance (DONE stays a master/harness judgment);
-- priority scheduling;
-- multi-master routing (`decision_owner`);
-- event stream as a signal bus; global event sequence/cursors.
-
-These are introduced only when canary evidence requires them (see V2_DESIGN §10.5).
-
-## Actuation quick start
+Run the test suite from a development checkout:
 
 ```bash
-farm --project P init
-farm --project P task-create --id T-1 \
-  --objective "..." --deliverable "..." --acceptance "..." \
-  --command "python my_worker.py"     # worker echoes FARM_LEASE_ID in its receipt
-farm --project P reconcile            # one pass: launch -> observe -> advance
-farm --project P doctor               # invariant check
-```
-
-The worker reads `FARM_RECEIPT_PATH`, `FARM_WORKER_ID`, `FARM_TASK_ID`,
-`FARM_LEASE_ID` from its environment and writes a JSON `Receipt` to
-`FARM_RECEIPT_PATH` when it reaches a wait boundary, submits, or fails.
-
-For real codex workers, create the task with `--workspace`/`--brief`(`--brief-file`)
-and drive it with the codex-tmux executor on a dedicated, isolated tmux server
-(never the live `farm` session):
-
-```bash
-farm --project P task-create --id T-1 \
-  --objective "..." --deliverable "..." --acceptance "..." \
-  --workspace /abs/workspace --brief-file BRIEF.md
-farm --project P reconcile --executor codex-tmux --session farm2 --tmux-socket canary
-```
-
-The executor drops a `.farm_receipt.py` helper into the workspace; the agent
-records `AWAITING`/`SUBMITTED`/`FAILED` with it (the helper echoes the lease id
-for fencing). Cluster specifics (PATH prelude, codex command) come from
-`CodexClusterConfig` / `FARM_CODEX_*` env, not the module.
-
-## Tests
-
-```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-The regression suite turns historical orchestration failures (and each review finding) into permanent invariants.
+The optional private-tmux canary uses a stub agent; the normal suite makes no model
+calls. See [contributing](CONTRIBUTING.md) for implementation rules and
+[lessons](docs/LESSONS.md) for the failures behind the regression tests.
+
+## Documentation
+
+- [Operations](docs/OPERATIONS.md): current commands and procedures for the Master.
+- [Master entrypoint](templates/RUNTIME_MASTER.md): the natural-language delegation workflow.
+- [Design contract](V2_DESIGN.md): retained invariants and the historical runtime baseline.
+- [Lessons](docs/LESSONS.md): failure mechanisms and the regression tests that preserve their fixes.
+
+The design and lessons files are maintainer references; the Owner does not need to
+read them to use a farm.
 
 ## License
 
-No license has been chosen yet. Add one intentionally before public distribution.
+A license has not yet been selected; this repository does not include a LICENSE file.

@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Fake sacct: answers --format fields for -j ids (or all jobs when -S is given), -P pipes."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fakeslurm import read_state  # noqa: E402
+
+argv = sys.argv[1:]
+if "--fail-query" in argv:
+    print("sacct: error: slurmdbd not responding", file=sys.stderr)
+    sys.exit(1)
+jobs = read_state()["jobs"]
+ids = argv[argv.index("-j") + 1].split(",") if "-j" in argv else list(jobs)
+fmt = "JobID,State"
+for a in argv:
+    if a.startswith("--format="):
+        fmt = a.split("=", 1)[1]
+fields = [f.split("%")[0] for f in fmt.split(",")]
+piped = "-P" in argv
+for jid in ids:
+    job = jobs.get(jid)
+    if not job:
+        continue
+    values = {"JobID": jid, "JobName": job["name"], "State": job["state"], "ExitCode": job["exit_code"],
+              "Elapsed": "00:01:00", "End": "2026-01-01T00:00:00", "Comment": job["comment"], "Submit": "2026-01-01T00:00:00"}
+    row = [values.get(f, "") for f in fields]
+    print("|".join(row) if piped else " ".join(f"{v:<20}" for v in row).rstrip())

@@ -77,6 +77,9 @@ def transition_task(
     if metadata_patch:
         metadata.update(metadata_patch)
 
+    if target is TaskState.DONE and not metadata.get("acceptance_receipt"):
+        raise TransitionError("DONE requires nonempty acceptance_receipt evidence, not only a boolean")
+
     lease = task.lease if new_lease is ... else new_lease
     return replace(task, state=target, metadata=metadata, lease=lease)  # type: ignore[arg-type]
 
@@ -91,13 +94,6 @@ class LeaseError(ValueError):
 # store boundary (see Reconciler._commit), paired with an event. They are kept as
 # separate pure validators only because the legality rules differ from the state
 # graph's; the persistence boundary is the same one transitions go through.
-
-
-def with_metadata(task: Task, patch: dict[str, Any]) -> Task:
-    """Authoritative metadata-only mutation (e.g. launched_ts). Commit like any other."""
-    meta = dict(task.metadata)
-    meta.update(patch)
-    return replace(task, metadata=meta)
 
 
 def acquire_lease(task: Task, new_lease: Lease, *, metadata_patch: dict[str, Any] | None = None) -> Task:

@@ -128,6 +128,7 @@ def test_happy_path_running_waiting_resume_submitted(tmp_path):
 
     # still blocked -> reconcile is a no-op
     ex.clear_receipt(wid)
+    ex.kill(wid)  # receipt alone does not establish process exit
     rec.reconcile_once()
     assert TaskStore(paths).get("T-1").state is TaskState.WAITING
 
@@ -216,7 +217,7 @@ def test_submitted_requires_master_acceptance_for_done(tmp_path):
         submitted, TaskState.DONE, acceptance_recorded=True,
         metadata_patch={"acceptance_receipt": "sha256:abc"},
     )
-    TaskStore(paths).put_authoritative(accepted)
+    TaskStore(paths).put_authoritative(accepted, expected=submitted)
     assert TaskStore(paths).get("T-1").state is TaskState.DONE
     _no_fail(paths)
 
@@ -377,7 +378,11 @@ def test_shared_workspace_among_active_tasks_is_rejected(tmp_path):
     paths = _paths(tmp_path)
     store = TaskStore(paths)
     store.create(_active_task("A", "/lab/ws/shared"))
-    store.create(_active_task("B", "/lab/ws/shared"))
+    from agent_farm_runtime.store import StoreConflict, atomic_write_json
+    with pytest.raises(StoreConflict):
+        store.create(_active_task("B", "/lab/ws/shared"))
+    # Simulate pre-upgrade/manual corruption: doctor must still detect it.
+    atomic_write_json(store.path_for("B"), _active_task("B", "/lab/ws/shared").to_dict())
     checks = run_doctor(paths)
     assert any(c.level == "FAIL" and "shared" in c.message for c in checks)
     # distinct workspaces are fine

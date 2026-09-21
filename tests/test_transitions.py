@@ -21,7 +21,10 @@ class TransitionTests(unittest.TestCase):
         task = Task("T1", "x", "out", "check", state=TaskState.SUBMITTED)
         with self.assertRaises(TransitionError):
             transition_task(task, TaskState.DONE)
-        done = transition_task(task, TaskState.DONE, acceptance_recorded=True)
+        with self.assertRaises(TransitionError):
+            transition_task(task, TaskState.DONE, acceptance_recorded=True)
+        done = transition_task(task, TaskState.DONE, acceptance_recorded=True,
+                               metadata_patch={"acceptance_receipt": "verified artifact sha256:abc"})
         self.assertEqual(done.state, TaskState.DONE)
 
     def test_stale_lease_rejected(self):

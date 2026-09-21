@@ -8,6 +8,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
 
+from .adapters.slurm import slurm_job_active, slurm_job_terminal, slurm_state
 
 @dataclass(frozen=True)
 class ShadowRecord:
@@ -32,21 +33,6 @@ def codex_cwds() -> set[Path]:
         except (FileNotFoundError, PermissionError, ValueError):
             continue
     return out
-
-
-def slurm_state(job_id: str) -> str | None:
-    """Observe SLURM only; never mutates jobs."""
-    if shutil.which("squeue"):
-        proc = subprocess.run(["squeue", "-h", "-j", job_id, "-o", "%T"], text=True, capture_output=True, check=False)
-        state = proc.stdout.strip().splitlines()
-        if state:
-            return state[0]
-    if shutil.which("sacct"):
-        proc = subprocess.run(["sacct", "-n", "-j", job_id, "--format=State", "-X"], text=True, capture_output=True, check=False)
-        state = [line.strip().split()[0] for line in proc.stdout.splitlines() if line.strip()]
-        if state:
-            return state[0]
-    return None
 
 
 def parse_awaiting(text: str) -> tuple[str, str] | None:
@@ -81,10 +67,12 @@ def inspect_workspace(workspace: Path, live_cwds: Iterable[Path] | None = None) 
             facts["slurm_state"] = state
             if state is None:
                 return ShadowRecord(str(workspace), facts, "UNKNOWN(observability_gap:job_state_unavailable)", "job state unavailable")
-            active = state.upper().split("+")[0] in {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "RESIZING"}
+            active = slurm_job_active(state)
             if active:
                 return ShadowRecord(str(workspace), facts, f"WOULD_WAIT(job:{ref})", f"SLURM job is {state}")
-            return ShadowRecord(str(workspace), facts, "WOULD_WAKE", f"SLURM job is no longer active ({state})")
+            if slurm_job_terminal(state):
+                return ShadowRecord(str(workspace), facts, "WOULD_WAKE", f"SLURM job ended ({state}); inspect result")
+            return ShadowRecord(str(workspace), facts, "UNKNOWN(observability_gap:unrecognized_job_state)", f"unrecognized SLURM state {state}")
 
         if kind == "artifact":
             target = Path(ref)

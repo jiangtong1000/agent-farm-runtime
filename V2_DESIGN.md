@@ -1,6 +1,18 @@
-# V2_DESIGN.md — durable-state-driven farm runtime (v0.3)
+# Runtime design contract — historical v0.3 baseline
 
-Status: CONTRACT ALIGNED TO IMPLEMENTATION. The minimal actuation layer is now
+This is a maintainer reference: retain the frozen lifecycle and invariants, while
+reading implementation maps, canary accounts and deferred items as historical
+statements about the v0.3 baseline. They are not the current feature list or an
+Owner setup guide. For current protocol 4 behavior, use [operations](docs/OPERATIONS.md),
+[compatibility](docs/COMPATIBILITY.md) and [portability](docs/PORTABILITY.md).
+
+Later releases added guarded decisions/CAS, recoverable state-event commits,
+workspace reservation, UNKNOWN executor observations, bounded restart budgets,
+planned turnover and summary inspection without changing the task lifecycle.
+Missing observations do not prove death; uncertain external effects require
+inspection instead of automatic adoption, even after grace.
+
+Historical v0.3 status: CONTRACT ALIGNED TO IMPLEMENTATION. The minimal actuation layer is now
 implemented in `src/agent_farm_runtime/` and validated by real-codex canaries
 (launch, crash-adoption, resume; see §10). v0.2 was DESIGN ONLY; v0.3 pins the
 representations that implementation settled and RATIFIES the actuation semantics
@@ -8,7 +20,7 @@ that v0.2 deferred (lease rotation, grace-based death detection, crash-consisten
 ordering, the structured receipt primitive). The next phase is NOT further
 feature development but running an isolated canary farm on this contract.
 
-Derived from the empirical review of the 2026-08-31 → 09-02 farm operation:
+Derived from an empirical review of farm operations:
 every failure was in the ephemeral coordination layer (tmux, nudger, master
 session memory); durable on-disk state and decoupled SLURM compute never failed.
 V2 makes that separation deliberate: the coordination layer itself derives from

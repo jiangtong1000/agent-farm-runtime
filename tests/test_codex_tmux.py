@@ -28,8 +28,11 @@ class TmuxRecorder:
 
     def __call__(self, cmd: list[str]) -> subprocess.CompletedProcess:
         self.calls.append(cmd)
+        if cmd[1:2] == ["-L"]:
+            cmd = [cmd[0], *cmd[3:]]
         if cmd[:2] == ["tmux", "has-session"]:
-            return subprocess.CompletedProcess(cmd, 0 if self._session else 1, "", "")
+            return subprocess.CompletedProcess(cmd, 0 if self._session else 1, "",
+                                               "" if self._session else "no server running on test socket")
         if cmd[:2] == ["tmux", "list-windows"]:
             return subprocess.CompletedProcess(cmd, 0, "\n".join(self._windows), "")
         if cmd[:2] == ["tmux", "new-session"]:
@@ -176,7 +179,7 @@ def test_resume_and_stop_never_do_window_surgery(tmp_path):
     rt = tmp_path / "runtime"; rt.mkdir()
     ws = tmp_path / "ws"; ws.mkdir()
     rec = TmuxRecorder()
-    ex = CodexTmuxExecutor(rt, run=rec)
+    ex = CodexTmuxExecutor(rt, run=rec, is_alive=lambda _: False)
     task = _task(ws)
     lease = Lease("W-1", "L1")
     ex.launch(task, lease)
@@ -185,6 +188,7 @@ def test_resume_and_stop_never_do_window_surgery(tmp_path):
     ex.resume(task, "W-1", lease)
     resume = next(ws.glob(".farm_resume_*.sh")).read_text()
     assert "codex exec --skip-git-repo-check --sandbox danger-full-access resume" in resume
+    ex.is_alive = lambda _: True
     ex.stop("W-1")
     # the crash-lesson invariant: the executor never kills or moves windows
     for c in rec.calls:
@@ -197,7 +201,7 @@ def test_resume_refreshes_worker_pid_identity_like_launch(tmp_path):
     points at the resumed worker's dead original."""
     rt = tmp_path / "rt"; rt.mkdir()
     ws = tmp_path / "ws"; ws.mkdir()
-    ex = CodexTmuxExecutor(rt, run=TmuxRecorder())
+    ex = CodexTmuxExecutor(rt, run=TmuxRecorder(), is_alive=lambda _: False)
     task = _task(ws)
     ex.launch(task, Lease("W-1", "L1"))
     (ws / ".session_id_W-1").write_text("01a00000-0000-7000-8000-000000000000")
@@ -222,8 +226,10 @@ def test_two_workers_in_one_workspace_are_never_confused(tmp_path):
     ex.launch(_task(ws, tid="T-a", label="A"), Lease("W-A", "LA"))
     ex.launch(_task(ws, tid="T-b", label="B"), Lease("W-B", "LB"))
     # same workspace, two workers: A is alive (this process), B is dead
-    (rt / "codex_workers" / "W-A.pid").write_text(f"{os.getpid()} {proc_starttime(os.getpid())}")
-    (rt / "codex_workers" / "W-B.pid").write_text("2147480000 1")  # nonexistent pid
+    a = ex._load_state("W-A")["attempt_id"]
+    b = ex._load_state("W-B")["attempt_id"]
+    (rt / "codex_workers" / "W-A.pid").write_text(f"{os.getpid()} {proc_starttime(os.getpid())} {a}")
+    (rt / "codex_workers" / "W-B.pid").write_text(f"2147480000 1 {b}")
     assert ex.poll("W-A").alive is True
     assert ex.poll("W-B").alive is False   # not fooled by A being live in the same ws
 
@@ -240,7 +246,7 @@ def test_launch_records_pid_identity_and_scopes_session_id_to_that_pid(tmp_path)
     assert "ls -t" not in s                 # no race-prone "newest rollout" heuristic
     assert "/proc/$_CPID/fd" not in s       # not the (unreliable) open-fd approach
     if shutil.which("bash"):
-        p = Path("/tmp/_farm_codex_render_check.sh")
+        p = tmp_path / "render_check.sh"
         p.write_text(s)
         assert subprocess.run(["bash", "-n", str(p)]).returncode == 0
         p.unlink()
