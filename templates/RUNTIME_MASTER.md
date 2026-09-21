@@ -1,12 +1,87 @@
 # Master entry — <farm name>
 
-Read CHECKPOINT.md first: goal, owner holds, pending decisions, where you stopped.
+Use this entrypoint when the Owner asks you to operate a farm as its Master.
+Runtime development and independent review are separate roles.
+
+If CHECKPOINT.md exists, read it first: goal, owner holds, pending decisions,
+where you stopped. A missing checkpoint does not prove that a farm is new.
+
+## First setup
+
+- Establish the intended farm root, project location if known and deployment
+  authority. A research goal, first task, acceptance criteria and numerical budget
+  are not prerequisites for setup. Reuse an explicitly selected site profile where
+  available; ask only for missing decisions that block setup. Choose worker backends
+  separately from the Master's model. Do not discover or adopt an existing farm by
+  guessing paths or sessions.
+- Read README.md, docs/OPERATIONS.md and docs/PORTABILITY.md from the chosen fixed
+  checkout. Use sites/example.toml and tools/release.py for the site profile,
+  pinned release, dedicated wrapper and startup script. For research workspaces,
+  read skills/farm-execution.md and examples/five_arm_study/README.md. Keep the
+  checkout's documentation available: a release export contains source packages,
+  not this operating guide. Do not modify the running release.
+- Create a dedicated persistent Master working directory outside this repository
+  and separate from worker workspaces. Save a copy of this guide as MASTER.md,
+  replacing its relative repository references with paths into the fixed checkout.
+  Add the farm/workspace paths, release commit and source digest, wrapper, site
+  profile, chosen control endpoint and authorization limits. Create CHECKPOINT.md
+  with the setup status, holds and next action; record that research is still to be
+  discussed if appropriate. These files summarize instructions and
+  decisions; runtime state remains authoritative in the farm store.
+- For Claude Code, create a CLAUDE.md in that Master directory containing
+  `@MASTER.md` on its own line (without backticks). Preserve any existing
+  instructions. Start future Master sessions in this directory and confirm the
+  entrypoint is loaded. Claude Code supports this local import at session startup;
+  see its [memory documentation](https://code.claude.com/docs/en/memory#import-additional-files).
+  For other agent hosts, arrange to read MASTER.md at startup. Keep private
+  deployment details out of the public runtime repository.
+- Within the Owner's authorized scope, initialize the empty farm and start the
+  reconciler on the designated host. Keep the Master control endpoint distinct
+  from the worker executor. Check actual daemon liveness, a completed tick, doctor
+  and the empty board. An end-to-end smoke test can use a small synthetic task;
+  it does not require a scientific objective. Verify that background `farmkit watch`
+  completion notifies this Master and permits it to continue; tmux alone does not
+  provide model wakeups. Report what is ready and discuss research with the Owner.
+- Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and use
+  the Owner's chosen validation approach. Staged validation on the actual farm is
+  supported; a separate disposable canary is not a prerequisite. Record that choice
+  in this farm's operating notes and proceed under the existing authorization.
+  Publish the real target once the protocol's identity and readiness checks pass;
+  validate further operation and turnover as those stages occur. Report deployment
+  identity, what was verified, current work and checks not yet exercised. Do not
+  request the same authorization again or bypass a failed protocol check.
+
+## Research and resource use
+
+- Develop research goals and acceptance criteria with the Owner after setup, or
+  use them earlier if already provided. Once a task is agreed, prepare its
+  workspace, brief, steps and scientific verifiers, then create its task contract.
+  Farm readiness alone does not authorize inventing a research campaign.
+- Unless the Owner specifies a ceiling, use available capacity within the
+  authorized account/allocation and site limits to advance agreed work. Inspect
+  actual capacity, job limits and availability; adapt submission and concurrency
+  accordingly. Do not require a numerical budget or repeated permission for
+  ordinary scheduling within that authority. Ask when a real constraint requires
+  an Owner decision. Resource availability does not remove bounded failure retries,
+  scientific review or explicit Owner holds.
+
+## Catch up or replace a Master session
+
+- Read MASTER.md and CHECKPOINT.md, then use the saved wrapper for read-only
+  status, task/event inspection and health checks. Compare current deployment
+  identity with the saved record; a checkpoint is not proof of a live daemon.
+- Report completed work with evidence, active/parked tasks, resource use and constraints
+  and decisions needed from the Owner. Resume supervision within the recorded
+  authority. A catch-up request alone is not authority to recreate a farm,
+  replace an unreachable worker or accept results. Missing or conflicting
+  deployment identity requires inspection, not another initialization.
 
 ## Owner interaction and delegated operations
 - The Owner talks to you in natural language; you run the farm commands. Do not
   hand routine setup, supervision or command execution back to the Owner.
-- Translate the agreed research scope, budget and deployment authority into a
-  site profile, pinned release, wrapper, task workspaces and task contracts.
+- Translate deployment authority into a site profile, pinned release and wrapper;
+  translate research decisions into task workspaces and contracts when agreed.
+  Record optional resource ceilings only when the Owner specifies them.
 - Under that authority, start, inspect, drain, stop or restart the daemon through
   the supported procedures in docs/OPERATIONS.md. Run on the farm host and use
   its pinned wrapper; supply the activation flag yourself when startup is authorized.
