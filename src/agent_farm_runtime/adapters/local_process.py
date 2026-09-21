@@ -59,9 +59,12 @@ class LocalProcessExecutor:
             raise ExecutorUnavailable(f"{worker_id}: unreadable local executor identity") from exc
 
     def _alive(self, worker_id: str) -> bool | None:
-        reap_children()  # clear zombies before judging liveness
         state = self._state(worker_id)
-        return observe_pidfile(str(self._pid_path(worker_id)), state, state.get("attempt_id"))
+        alive = observe_pidfile(str(self._pid_path(worker_id)), state, state.get("attempt_id"))
+        # Reap after observing: a worker can exit between an earlier reap and
+        # the liveness check, leaving a zombie even though we report it dead.
+        reap_children()
+        return alive
 
     def validate_task(self, task: Task) -> None:
         command = task.metadata.get("command")
