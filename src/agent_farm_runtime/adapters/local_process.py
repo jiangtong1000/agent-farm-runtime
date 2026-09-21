@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import subprocess
+import uuid
 from pathlib import Path
 
 from ..models import Lease, Receipt, Task
-from ..procutil import pid_identity_alive, proc_starttime, read_pidfile, reap_children
-from .base import LaunchHandle, WorkerObservation
+from ..procutil import host_identity, observe_pidfile, proc_starttime, read_pidfile, reap_children
+from .base import ExecutorUnavailable, LaunchHandle, WorkerObservation
+from .filesystem import atomic_write_json
 
 
 class LocalProcessExecutor:
@@ -41,19 +44,53 @@ class LocalProcessExecutor:
         p = self._pid_path(worker_id)
         return read_pidfile(str(p)) if p.exists() else (None, None)
 
-    def _alive(self, worker_id: str) -> bool:
+    def _state_path(self, worker_id: str) -> Path:
+        return self.procs_dir / f"{worker_id}.json"
+
+    def _state(self, worker_id: str) -> dict:
+        try:
+            value = json.loads(self._state_path(worker_id).read_text())
+            if not isinstance(value, dict):
+                raise ValueError("not an object")
+            return value
+        except FileNotFoundError:
+            return {}
+        except (ValueError, OSError) as exc:
+            raise ExecutorUnavailable(f"{worker_id}: unreadable local executor identity") from exc
+
+    def _alive(self, worker_id: str) -> bool | None:
         reap_children()  # clear zombies before judging liveness
-        pid, start = self._identity(worker_id)
-        return pid_identity_alive(pid, start)
+        state = self._state(worker_id)
+        return observe_pidfile(str(self._pid_path(worker_id)), state, state.get("attempt_id"))
+
+    def validate_task(self, task: Task) -> None:
+        command = task.metadata.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("local-process requires a nonempty command")
+        cwd = task.metadata.get("cwd")
+        if cwd and (not isinstance(cwd, str) or not Path(cwd).is_dir()):
+            raise ValueError("local-process cwd must be an existing directory")
 
     def launch(self, task: Task, lease: Lease) -> LaunchHandle:
         wid = lease.worker_id
         # idempotent for a given lease: if THIS worker (pid+starttime) is already
         # running, do not start a second process.
-        if self._alive(wid):
-            pid, _ = self._identity(wid)
-            return LaunchHandle(worker_id=wid, session_handle=f"pid:{pid}")
+        if self._state_path(wid).exists() or self._pid_path(wid).exists():
+            alive = self._alive(wid)
+            if alive is True:
+                pid, _ = self._identity(wid)
+                return LaunchHandle(worker_id=wid, session_handle=f"pid:{pid}")
+            if alive is None:
+                raise ExecutorUnavailable(f"{wid}: prior local dispatch unverified; launch withheld")
         receipt_path = self._receipt_path(wid)
+        try:
+            prior = receipt_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            prior = None
+        attempt = uuid.uuid4().hex
+        atomic_write_json(self._state_path(wid), {
+            **host_identity(), "attempt_id": attempt, "previous_receipt": prior,
+        })
         receipt_path.unlink(missing_ok=True)  # fresh generation: no stale receipt
         env = dict(os.environ)
         env.update(
@@ -61,6 +98,7 @@ class LocalProcessExecutor:
             FARM_WORKER_ID=wid,
             FARM_TASK_ID=task.id,
             FARM_LEASE_ID=lease.lease_id,
+            FARM_TASK_PATH=str(self.procs_dir.parent.parent / "tasks" / f"{task.id}.json"),
         )
         command = task.metadata.get("command")
         if not command:
@@ -70,27 +108,34 @@ class LocalProcessExecutor:
             cwd=task.metadata.get("cwd") or None, start_new_session=True,
         )
         # record a stable identity: pid + start-time, so pid reuse cannot alias it
-        self._pid_path(wid).write_text(f"{proc.pid} {proc_starttime(proc.pid)}")
+        self._pid_path(wid).write_text(f"{proc.pid} {proc_starttime(proc.pid)} {attempt}")
         return LaunchHandle(worker_id=wid, session_handle=f"pid:{proc.pid}")
 
     def resume(self, task: Task, worker_id: str, lease: Lease) -> None:
-        # Local processes are not re-woken; a crashed local worker is re-actuated
-        # by adoption (relaunch) instead.
-        return None
+        # A fresh invocation under the retained lease; launch refuses uncertainty.
+        self.launch(task, lease)
 
     def poll(self, worker_id: str) -> WorkerObservation:
         receipt = None
         rp = self._receipt_path(worker_id)
         if rp.exists():
             try:
-                receipt = Receipt.from_dict(json.loads(rp.read_text()))
+                raw = rp.read_bytes()
+                from .codex import _same_as_previous
+                if not _same_as_previous(raw, self._state(worker_id)):
+                    receipt = Receipt.from_dict(json.loads(raw))
             except (ValueError, KeyError):
                 receipt = None
-        return WorkerObservation(worker_id=worker_id, alive=self._alive(worker_id), receipt=receipt)
+        alive = self._alive(worker_id)
+        return WorkerObservation(worker_id=worker_id, alive=alive, receipt=receipt,
+                                 detail="local dispatch or host identity unverified" if alive is None else None)
 
     def stop(self, worker_id: str) -> None:
         pid, start = self._identity(worker_id)
-        if not pid_identity_alive(pid, start):  # only signal the process we launched
+        alive = self._alive(worker_id)
+        if alive is None:
+            raise ExecutorUnavailable(f"{worker_id}: cannot verify signal target; stop withheld")
+        if alive is False:
             reap_children()
             return
         try:

@@ -1,0 +1,43 @@
+# Example site profile for farmkit / farmboard. Copy to
+#   ~/.config/agent-farm/sites/<name>.toml   (or point $FARMKIT_SITE at it)
+# and fill in YOUR cluster. The repository never contains a real site (D3).
+
+[site]
+name = "example"
+# Regular expression matched against `hostname`; the first matching profile wins.
+hostname_pattern = "^node.*\\.example\\.edu$"
+shared_roots = ["/shared/lab"]
+
+[scheduler]
+kind = "slurm"
+squeue = "squeue"
+sacct = "sacct"
+sbatch = "sbatch"
+accounting_stores_comment = true    # sacct keeps --comment (AccountingStoreFlags=job_comment)
+dependency_kill_invalid = true      # DependencyParameters=kill_invalid_depend
+barrier_partition = "test"          # partition for optional afterany barrier jobs
+barrier_time = "0:05:00"
+poll_interval_s = 30
+
+[python]
+runtime_interpreter = "/path/to/python"
+farmkit_interpreter = "/path/to/python"
+
+[executor.codex]
+cmd = "codex exec --skip-git-repo-check --sandbox danger-full-access -m <model> -c model_reasoning_effort=medium"
+path_prelude = "export PATH=/path/to/node/bin:$PATH"
+
+[executor.claude]
+cmd = "claude -p --dangerously-skip-permissions --output-format json"
+
+[worker]
+default_model = "<model>"
+default_effort = "medium"
+rotate_after_wakes = 12
+rotate_when_input_tokens_over = 120000
+
+[paths]
+farms_root = "/shared/lab/farms"
+releases_root = "/shared/lab/agent-farm-releases"
+# farm wrapper (pinned release entry point) used by watch/health/board for read-only queries
+farm_wrapper = "/shared/lab/farms/farm"

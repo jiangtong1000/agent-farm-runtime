@@ -23,15 +23,24 @@ class LaunchHandle:
 class WorkerObservation:
     """What the executor can observe about a worker it launched.
 
-    alive: is the underlying process/session still running?
+    alive: True=observed alive, False=positively observed dead, None=UNKNOWN.
+    UNKNOWN must never revoke a lease or authorize a launch/resume/signal.
     receipt: the worker's latest structured receipt, if it has written one.
     The reconciler fences the receipt against Task.lease itself; the executor is
     only responsible for surfacing it.
     """
 
     worker_id: str
-    alive: bool
+    alive: bool | None
     receipt: Receipt | None = None
+    detail: str | None = None
+
+
+class ExecutorUnavailable(RuntimeError):
+    """An executor operation failed or its outcome cannot be established.
+
+    Never interpret this exception (or alive=None) as proof of worker death.
+    """
 
 
 class WorkerExecutor(Protocol):
@@ -55,9 +64,3 @@ class WorkerExecutor(Protocol):
     def poll(self, worker_id: str) -> WorkerObservation: ...
 
     def stop(self, worker_id: str) -> None: ...
-
-
-class ComputeObserver(Protocol):
-    """Future boundary for external compute substrates such as SLURM."""
-
-    def observe_job(self, job_id: str) -> str | None: ...

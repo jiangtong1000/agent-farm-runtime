@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
-import os
 from pathlib import Path
+
+from .adapters.filesystem import FileLockBusy, exclusive_lock
 
 
 class ReconcilerBusy(RuntimeError):
     """Another reconciler already holds the exclusive lock for this farm."""
+
+
+@contextlib.contextmanager
+def task_mutation_lock(runtime_dir: Path):
+    """Short, cooperative transaction lock shared by masters and reconciler.
+
+    Separate from the daemon-lifetime lock. All writers must run this version;
+    this is not a cross-host fencing service and cannot fence legacy JSON edits.
+    """
+    with exclusive_lock(runtime_dir / "task-mutation.lock", blocking=True):
+        yield
 
 
 @contextlib.contextmanager
@@ -20,22 +31,8 @@ def single_reconciler(runtime_dir: Path):
     is sufficient for a single-host farm; a distributed farm would need a fenced
     lease service instead (deferred).
     """
-    runtime_dir = Path(runtime_dir)
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = runtime_dir / "reconcile.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise ReconcilerBusy(
-                f"another reconciler holds {lock_path}; refusing to run concurrently"
-            ) from exc
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        try:
+        with exclusive_lock(Path(runtime_dir) / "reconcile.lock", blocking=False, record_pid=True):
             yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    except FileLockBusy as exc:
+        raise ReconcilerBusy(str(exc)) from exc

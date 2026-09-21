@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Fake sbatch: records the job and prints a new numeric id (--parsable form)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fakeslurm import State  # noqa: E402
+
+argv = sys.argv[1:]
+if "--fail-submit" in argv:
+    print("sbatch: error: Batch job submission failed: Invalid partition name specified", file=sys.stderr)
+    sys.exit(1)
+with State() as st:
+    jid = st.submit(argv)
+print(jid if "--parsable" in argv else f"Submitted batch job {jid}")

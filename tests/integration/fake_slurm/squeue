@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Fake squeue: prints active jobs among -j ids using the -o format (%i job id, %T state)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fakeslurm import ACTIVE, read_state  # noqa: E402
+
+argv = sys.argv[1:]
+ids = argv[argv.index("-j") + 1].split(",") if "-j" in argv else []
+fmt = argv[argv.index("-o") + 1] if "-o" in argv else "%i %T"
+jobs = read_state()["jobs"]
+for jid in ids:
+    job = jobs.get(jid)
+    if job and job["state"] in ACTIVE:
+        print(fmt.replace("%i", jid).replace("%T", job["state"]))

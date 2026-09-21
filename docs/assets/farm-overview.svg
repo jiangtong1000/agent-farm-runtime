@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="866" viewBox="0 0 920 866" role="img" aria-labelledby="title description">
+  <title id="title">A preliminary agent farm</title>
+  <desc id="description">The Owner talks to the Master in natural language and discusses findings with an independent Reviewer outside the farm. The Master sets up and supervises the farm under the Owner's authority. The runtime dispatches workers and receives their receipts. Workers use farmkit to execute and verify the methods, scripts and scientific checks supplied by a research harness in a separate project repository. Dashed links show execution of that harness and inspection of evidence in its workspace. The Quest Board displays runtime task records and workspace evidence for the Master and Reviewer to inspect. Reviewer advice returns to the Owner, who decides what to ask the Master to do next. The task rows are illustrative.</desc>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#527ca6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#9270aa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#418b7f" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-harness" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#a07b55" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #23374a; }
+      .heading { font-size: 23px; font-weight: 700; }
+      .body { font-size: 16px; fill: #4b6074; }
+      .small { font-size: 14px; fill: #607489; }
+      .label { font-size: 14px; font-weight: 600; }
+      .icon { fill: none; stroke: white; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .link { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+  </defs>
+
+  <!-- A fixed, nearly square composition stays legible in a README column. -->
+  <rect width="920" height="866" rx="20" fill="#f0f4f9"/>
+  <text x="40" y="43" font-size="25" font-weight="700">A preliminary agent farm</text>
+  <text x="40" y="70" class="body">Architecture overview</text>
+
+  <!-- The two conversations stay outside the execution boundary. -->
+  <g id="owner">
+    <rect x="40" y="100" width="360" height="126" rx="14" fill="#fffaf0" stroke="#e7d5ae"/>
+    <rect x="60" y="118" width="42" height="42" rx="11" fill="#bc8b37"/>
+    <g class="icon" transform="translate(60 118)" aria-hidden="true">
+      <circle cx="21" cy="14" r="5"/>
+      <path d="M 11 32 V 29 C 11 20 31 20 31 29 V 32"/>
+    </g>
+    <text x="116" y="140" class="heading">Owner</text>
+    <text x="116" y="159" class="small">Research direction</text>
+    <text x="60" y="187" class="body">Goals, budgets and next steps.</text>
+    <text x="60" y="209" class="body">Natural-language interaction.</text>
+  </g>
+
+  <g id="reviewer">
+    <rect x="550" y="100" width="330" height="126" rx="14" fill="#f7f1fb" stroke="#d8c9e4"/>
+    <rect x="570" y="118" width="42" height="42" rx="11" fill="#9270aa"/>
+    <g class="icon" transform="translate(570 118)" aria-hidden="true">
+      <path d="M 12 31 H 9 V 9 H 25 V 14 M 14 15 H 20 M 14 20 H 17"/>
+      <circle cx="25" cy="24" r="6"/>
+      <path d="M 29 29 L 34 34"/>
+    </g>
+    <text x="626" y="140" class="heading">Reviewer</text>
+    <text x="626" y="159" class="small">Independent of the farm</text>
+    <text x="570" y="187" class="body">Inspect results and challenge conclusions.</text>
+    <text x="570" y="209" class="body">Discuss findings with the Owner.</text>
+  </g>
+
+  <path class="link" d="M 412 166 H 538" stroke="#9270aa" marker-start="url(#arrow-purple)" marker-end="url(#arrow-purple)"/>
+  <text x="475" y="139" text-anchor="middle" class="label" style="fill:#806094">Review</text>
+  <text x="475" y="156" text-anchor="middle" class="label" style="fill:#806094">together</text>
+
+  <!-- The farm window contains the operational loop, not the Reviewer. -->
+  <rect x="32" y="340" width="856" height="482" rx="16" fill="#e2e9f2"/>
+  <rect x="32" y="336" width="856" height="482" rx="16" fill="#fff" stroke="#cfdaE7"/>
+  <path d="M 48 336 H 872 Q 888 336 888 352 V 382 H 32 V 352 Q 32 336 48 336 Z" fill="#e9f0f8"/>
+  <path d="M 32 382 H 888" stroke="#d7e2ed"/>
+  <circle cx="57" cy="359" r="4" fill="#6d8dab"/>
+  <circle cx="72" cy="359" r="4" fill="#91adbf"/>
+  <circle cx="87" cy="359" r="4" fill="#b4c6d3"/>
+  <text x="105" y="364" class="label">RESEARCH FARM</text>
+  <text x="403" y="364" class="small">Within your approved plan</text>
+
+  <!-- Owner ↔ Master is the operational interface; review has no automatic control edge. -->
+  <path class="link" d="M 286 236 V 392" stroke="#527ca6" marker-start="url(#arrow-blue)" marker-end="url(#arrow-blue)"/>
+  <text x="270" y="270" text-anchor="end" class="label" style="fill:#416b95">Talk to Master</text>
+  <text x="270" y="292" text-anchor="end" class="small">Goals, approvals, updates</text>
+  <text x="270" y="312" text-anchor="end" class="small">“Catch me up.”</text>
+
+  <path class="link" d="M 716 400 V 238" stroke="#9270aa" marker-end="url(#arrow-purple)"/>
+  <text x="732" y="284" class="label" style="fill:#806094">Inspect</text>
+  <text x="732" y="305" class="small">Deliverables + evidence</text>
+
+  <g id="master">
+    <rect x="64" y="400" width="288" height="150" rx="12" fill="#f0f6fd" stroke="#c9daed"/>
+    <rect x="82" y="418" width="42" height="42" rx="10" fill="#527ca6"/>
+    <g class="icon" transform="translate(82 418)" aria-hidden="true">
+      <path d="M 9 10 H 33 V 27 H 20 L 13 33 V 27 H 9 Z"/>
+      <path d="M 15 16 H 27 M 15 21 H 23"/>
+    </g>
+    <text x="138" y="440" class="heading">Master</text>
+    <text x="138" y="460" class="small">Farm setup + supervision</text>
+    <text x="82" y="489" class="body">Set up and supervise the farm.</text>
+    <text x="82" y="511" class="body">Turn the plan into tasks.</text>
+    <text x="82" y="533" class="body">Run the farm commands.</text>
+  </g>
+
+  <g id="quest-board">
+    <rect x="524" y="400" width="332" height="240" rx="12" fill="#fff" stroke="#cbd9e7"/>
+    <path d="M 536 400 H 844 Q 856 400 856 412 V 478 H 524 V 412 Q 524 400 536 400 Z" fill="#f0f4f9"/>
+    <rect x="542" y="418" width="42" height="42" rx="10" fill="#607d99"/>
+    <g class="icon" transform="translate(542 418)" aria-hidden="true">
+      <rect x="9" y="10" width="24" height="23" rx="2"/>
+      <path d="M 9 16 H 33 M 17 16 V 33 M 25 16 V 33"/>
+    </g>
+    <text x="598" y="440" class="heading">Quest Board</text>
+    <text x="598" y="460" class="small">Progress + evidence</text>
+
+    <rect x="542" y="492" width="296" height="30" rx="6" fill="#eef5fc"/>
+    <circle cx="556" cy="507" r="4" fill="#527ca6"/>
+    <text x="569" y="512" font-size="15">Experiment A</text>
+    <text x="824" y="512" text-anchor="end" font-size="13" font-weight="600" style="fill:#406d99">RUNNING</text>
+
+    <rect x="542" y="530" width="296" height="30" rx="6" fill="#fff7e9"/>
+    <circle cx="556" cy="545" r="4" fill="#b8842e"/>
+    <text x="569" y="550" font-size="15">Experiment B</text>
+    <text x="824" y="550" text-anchor="end" font-size="13" font-weight="600" style="fill:#986c22">WAITING</text>
+
+    <rect x="542" y="568" width="296" height="30" rx="6" fill="#eff7f3"/>
+    <circle cx="556" cy="583" r="4" fill="#418b7f"/>
+    <text x="569" y="588" font-size="15">Comparison</text>
+    <text x="824" y="588" text-anchor="end" font-size="13" font-weight="600" style="fill:#32786d">SUBMITTED</text>
+
+    <text x="690" y="625" text-anchor="middle" class="small">A view of task records + workspace evidence</text>
+  </g>
+
+  <path class="link" d="M 514 444 H 364" stroke="#527ca6" marker-end="url(#arrow-blue)"/>
+  <text x="438" y="434" text-anchor="middle" class="label" style="fill:#416b95">Progress</text>
+  <text x="438" y="467" text-anchor="middle" class="small">Pending decisions</text>
+
+  <path class="link" d="M 208 558 V 576" stroke="#527ca6" marker-end="url(#arrow-blue)"/>
+  <g id="runtime">
+    <rect x="64" y="586" width="288" height="72" rx="12" fill="#f6f8fb" stroke="#d5dfeb"/>
+    <text x="82" y="614" font-size="19" font-weight="700">Farm runtime</text>
+    <text x="82" y="638" class="body">Dispatch · wait · resume</text>
+  </g>
+  <path class="link" d="M 362 616 H 514" stroke="#527ca6" marker-end="url(#arrow-blue)"/>
+  <text x="438" y="605" text-anchor="middle" class="small">Task records</text>
+
+  <path class="link" d="M 208 668 V 694" stroke="#418b7f" marker-start="url(#arrow-teal)" marker-end="url(#arrow-teal)"/>
+  <text x="226" y="686" class="small">Wake / receipts</text>
+  <g id="workers">
+    <rect x="64" y="704" width="288" height="88" rx="12" fill="#edf7f3" stroke="#c5dfd5"/>
+    <rect x="82" y="725" width="42" height="42" rx="10" fill="#418b7f"/>
+    <g class="icon" transform="translate(82 725)" aria-hidden="true">
+      <rect x="9" y="12" width="24" height="20" rx="4"/>
+      <path d="M 21 7 V 12 M 16 26 H 26"/>
+      <circle cx="16" cy="20" r="1" fill="white"/>
+      <circle cx="26" cy="20" r="1" fill="white"/>
+    </g>
+    <text x="138" y="744" class="heading">Workers</text>
+    <text x="138" y="766" font-size="15" style="fill:#4b6074">Run task steps · farmkit</text>
+  </g>
+
+  <!-- This project-owned harness is part of the workflow, but outside this repository. -->
+  <g id="research-harness">
+    <rect x="524" y="704" width="332" height="108" rx="12" fill="#fff9f1" stroke="#b79571" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <rect x="542" y="719" width="42" height="42" rx="10" fill="#a07b55"/>
+    <g class="icon" transform="translate(542 719)" aria-hidden="true">
+      <path d="M 8 13 H 18 L 21 17 H 34 V 32 H 8 Z"/>
+      <path d="M 17 22 L 14 25 L 17 28 M 25 22 L 28 25 L 25 28"/>
+    </g>
+    <text x="598" y="738" font-size="22" font-weight="700">Research harness</text>
+    <text x="598" y="758" class="small">Outside this repository</text>
+    <text x="542" y="782" font-size="15" style="fill:#4b6074">Methods · scripts · scientific checks</text>
+    <text x="542" y="802" font-size="15" style="fill:#4b6074">Project workspace + result artifacts</text>
+  </g>
+  <path class="link" d="M 362 748 H 514" stroke="#a07b55" stroke-dasharray="6 5" marker-end="url(#arrow-harness)"/>
+  <text x="438" y="734" text-anchor="middle" class="label" style="fill:#85613e">Run + verify</text>
+  <text x="438" y="772" text-anchor="middle" class="small">via farmkit</text>
+  <path class="link" d="M 690 694 V 650" stroke="#a07b55" stroke-dasharray="6 5" marker-end="url(#arrow-harness)"/>
+  <text x="706" y="679" class="label" style="fill:#85613e">Results + evidence</text>
+
+  <path class="link" d="M 246 846 H 286" stroke="#a07b55" stroke-dasharray="6 5"/>
+  <text x="298" y="851" class="small">External research harness and workspace</text>
+</svg>

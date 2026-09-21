@@ -1,0 +1,56 @@
+# Five-arm teaching study, expressed as a farmkit step table.
+# Three arms at seed 1 -> pick the arm with the lowest finite validation metric ->
+# two arms at seed 2 -> per arm a two-segment AFQMC chain. A real project copies this
+# file, keeps the shape, and changes names, scripts and outputs.
+
+[defaults]
+retry = { infra = 1 }                      # node failure / preemption: one automatic resubmission
+snapshot = ["*.py", "*.sbatch"]            # copied per attempt; queued jobs never follow later edits
+finite = ["selected.metric"]               # every declared metric must be a finite number
+
+[step."train:{arm}"]
+matrix.arm = ["lam0", "lam0.1", "lam1"]
+run = "train.sbatch"
+env = { ARM = "{arm}", SEED = "1" }
+outputs = ["runs/{arm}/RUN.json"]          # first output is the main JSON artifact
+group = "round1"                           # wait = "earliest" (default): wake on the first job to end
+verify = "verify_train"
+
+[step."select"]
+after = ["group:round1"]
+run = "python select_arm.py"                   # local command; still an attempt with a verdict
+outputs = ["selection.json"]
+finite = []
+
+[step."train2:{arm}"]
+matrix.arm = ["lam0", "mixed"]
+run = "train.sbatch"
+env = { ARM = "{arm}", SEED = "2" }
+outputs = ["runs2/{arm}/RUN.json"]
+after = ["select"]
+group = "round2"
+verify = "verify_train"
+
+[step."afqmc:{arm}"]
+matrix.arm = ["lam0", "lam0.1", "lam1"]
+run = "segment.sbatch"
+env = { ARM = "{arm}", ROUND = "1" }
+outputs = ["afqmc/{arm}/seg{seg}/SEGMENT_END.json"]
+after = ["train:{arm}"]
+segments = 2
+chain = "afterok"
+concurrency = 2
+verify = "verify_segment"
+finite = []
+
+[step."afqmc2:{arm}"]
+matrix.arm = ["lam0", "mixed"]
+run = "segment.sbatch"
+env = { ARM = "{arm}", ROUND = "2" }
+outputs = ["afqmc2/{arm}/seg{seg}/SEGMENT_END.json"]
+after = ["train2:{arm}"]
+segments = 2
+chain = "afterok"
+concurrency = 2
+verify = "verify_segment"
+finite = []
