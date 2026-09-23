@@ -70,6 +70,33 @@ def classify_event(event: dict) -> dict | None:
     return None
 
 
+def ruling_parks(status: dict) -> list[dict]:
+    """Status-derived hits for tasks parked on a `ruling:` condition.
+
+    Task state is the authoritative source for `waiting_on`; the reconciler's
+    RECEIPT_APPLIED payload historically carried only worker/status/target, so a park was
+    invisible to `classify_event` and only SUBMITTED receipts ever woke the master. Reading
+    status also surfaces a task that was already parked before the master's cursor, which no
+    event replay can recover once the cursor has been advanced. Each hit carries a stable
+    `state_id` including the revision, so an acknowledged park is not re-reported until the
+    task actually moves.
+    """
+    hits: list[dict] = []
+    for task in status.get("tasks", []):
+        if task.get("state") not in {"WAITING", "RUNNING", "BLOCKED"}:
+            continue
+        waiting_on = task.get("waiting_on") or ""
+        parsed = parse_ruling(waiting_on, task.get("id"))
+        if not parsed:
+            continue
+        owner_only = parsed["owner_only"]
+        hits.append({"reason": "ruling", "task": task.get("id"), "waiting_on": waiting_on,
+                     "class": parsed["class"], "master_may_resolve": not owner_only,
+                     "suggest": "task-ruling" if not owner_only else "leave to Owner",
+                     "state_id": f"ruling:{task.get('id')}:{task.get('revision')}"})
+    return hits
+
+
 def daemon_down(status: dict, *, now: float) -> dict | None:
     """Status-derived hit. Carries a stable `state_id` so an acknowledged failure is not
     re-reported until something changes (a new pid, a later tick that then stalls)."""
@@ -127,6 +154,10 @@ def watch(reader: RuntimeReader, cursor_file: Path, *, until: str | None = None,
         down = daemon_down(status, now=clock())
         if down and down["state_id"] not in acked_states:
             return {"reason": down["reason"], "hits": [down], "cursor": join_cursor(scan, acked_states | {down["state_id"]}), "acked": False}
+        parks = [p for p in ruling_parks(status) if p["state_id"] not in acked_states]
+        if parks:
+            return {"reason": parks[0]["reason"], "hits": parks,
+                    "cursor": join_cursor(scan, acked_states | {p["state_id"] for p in parks}), "acked": False}
         if clock() >= deadline:
             return {"reason": "timeout", "hits": [], "cursor": join_cursor(scan, acked_states), "acked": False}
         sleep(poll_s)

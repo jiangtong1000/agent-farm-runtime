@@ -30,6 +30,16 @@ class FakeReader:
         return self.events[start:], str(len(self.events))
 
 
+class TaskStateReader(FakeReader):
+    """FakeReader whose daemon stays live with the test clock while exposing task state."""
+
+    def __init__(self, tasks):
+        super().__init__()
+        self.tasks = tasks
+
+    def status(self):
+        return {"pid_alive": True, "interval": 30, "last_tick": {"epoch": self.now()}, "tasks": self.tasks}
+
 def run_watch(reader, cursor_file, **kw):
     clock = [1000.0]
 
@@ -60,6 +70,42 @@ def test_watch_hits_on_ruling_and_submitted_and_replays_until_acked(tmp_path):
     assert r3["reason"] == "timeout" and r3["hits"] == []
     text = watch.format_hits(r2)
     assert text.count("\n") == 1 and '"cursor": "3"' in text
+
+
+def test_watch_reports_ruling_parks_from_task_state_with_production_payload(tmp_path):
+    """Regression: the reconciler's RECEIPT_APPLIED payload carries no `waiting_on`, so a park
+    is invisible to classify_event. Observed on a live farm: 183 receipts, 0 with waiting_on,
+    two master-resolvable parks idle ~3 h because only SUBMITTED receipts woke the master."""
+    tasks = [{"id": "T-1", "state": "WAITING", "revision": 9,
+              "waiting_on": "ruling:T-1-code-adapter-abcd1234"}]
+    reader = TaskStateReader(tasks)
+    # exactly what the reconciler emits: no waiting_on key at all
+    reader.push("RECEIPT_APPLIED", "T-1", status="AWAITING", to="WAITING")
+    cursor_file = tmp_path / "cursor"
+    r = run_watch(reader, cursor_file)
+    assert r["reason"] == "ruling"
+    assert r["hits"][0]["task"] == "T-1" and r["hits"][0]["master_may_resolve"] is True
+    watch.ack(cursor_file, r["cursor"])
+    assert run_watch(reader, cursor_file)["reason"] == "timeout"      # silenced once acknowledged
+    tasks[0]["revision"] = 10                                         # the task moved: report again
+    assert run_watch(reader, cursor_file)["reason"] == "ruling"
+
+
+def test_watch_ignores_ruling_waits_on_finished_tasks(tmp_path):
+    """A DONE task can retain a stale waiting_on; it must not wake the master."""
+    reader = TaskStateReader([{"id": "T-9", "state": "DONE", "revision": 4,
+                               "waiting_on": "ruling:T-9-code-old-abcd1234"}])
+    assert run_watch(reader, tmp_path / "c")["reason"] == "timeout"
+
+
+def test_watch_finds_a_park_that_predates_the_cursor(tmp_path):
+    """Events cannot recover a park already acknowledged past; task state still shows it."""
+    reader = TaskStateReader([{"id": "T-2", "state": "WAITING", "revision": 3,
+                               "waiting_on": "ruling:T-2-code-envelope-abcd1234"}])
+    reader.push("RECEIPT_APPLIED", "T-2", status="AWAITING", to="WAITING")
+    cursor_file = tmp_path / "cursor"
+    watch.ack(cursor_file, "1")                       # master already advanced past the event
+    assert run_watch(reader, cursor_file)["reason"] == "ruling"
 
 
 def test_watch_marks_science_and_owner_rulings_as_owner_only(tmp_path):
