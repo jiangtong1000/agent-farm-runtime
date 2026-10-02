@@ -29,6 +29,8 @@ import shutil
 import stat
 import subprocess
 import sys
+if sys.version_info < (3, 11):
+    sys.exit("error: tools/release.py requires Python 3.11+ (tomllib is stdlib only from 3.11); run with the runtime interpreter")
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
