@@ -171,3 +171,39 @@ def test_new_from_contract_parser_and_command(board):
     argv = actions.command(sub, "new-from", farm_wrapper="/f", project="/p", actor="m", new_task_id="T-SUBMITTED-next",
                            brief_file="/b.md", **{k: parsed[k] for k in ("objective", "deliverable", "acceptance")})
     assert "<fill>" not in argv and "report.md" in argv
+
+
+@pytest.mark.parametrize("matches, text", [(None, "no daemon manifest yet"), (True, "source ok"),
+                                           (False, "SOURCE MISMATCH")])
+def test_board_source_comparison_preserves_unknown(matches, text):
+    status = _status([])
+    status.update(pid_alive=None, source_matches=matches)
+    board = build(FakeReader(status, {}, []), farm="fresh")
+    for rendered in (render_text(board), render_html(board)):
+        assert text in rendered
+        if matches is None:
+            assert "SOURCE MISMATCH" not in rendered
+
+
+@pytest.mark.parametrize("alive", [False, None, True])
+def test_terminal_job_wait_needs_attention_before_resume(alive):
+    task = {"id": "T-WAIT", "state": "WAITING", "waiting_on": "job:123", "lease": None}
+    status = _status([task])
+    status.update(pid_alive=alive, observed_jobs=[{"job_id": "123", "state": "COMPLETED", "terminal": True}])
+    board = build(FakeReader(status, {"T-WAIT": {}}, []), farm="example")
+    assert not board.live
+    card, = board.needs_you
+    assert card.needs_you == "job-terminal"
+    for rendered in (render_text(board), render_html(board)):
+        assert "job:123 is COMPLETED; awaiting worker resume" in rendered
+        assert ("daemon unavailable" in rendered) is (alive is not True)
+
+
+@pytest.mark.parametrize("state", [None, "PENDING", "RUNNING"])
+def test_unknown_or_active_job_is_not_a_terminal_attention_item(state):
+    task = {"id": "T-WAIT", "state": "WAITING", "waiting_on": "job:123", "lease": None}
+    status = _status([task])
+    status.update(pid_alive=False, observed_jobs=[{"job_id": "123", "state": state}])
+    board = build(FakeReader(status, {"T-WAIT": {}}, []), farm="example")
+    assert not board.needs_you
+    assert [c.id for c in board.live] == ["T-WAIT"]

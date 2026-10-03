@@ -26,7 +26,7 @@ def test_status_json_without_deployment_is_honest(tmp_path):
     paths, store = _farm(tmp_path)
     store.create(Task("T-1", "o", "d", "a"))
     status = farm_status(paths, slurm=lambda j: None)
-    assert status["deployment"] is None and status["source_matches"] is False
+    assert status["deployment"] is None and status["source_matches"] is None
     assert status["pid_alive"] is None and status["last_tick"] is None
     assert status["task_counts"]["READY"] == 1 and len(status["tasks"]) == 1
     assert not status["pending_task_commit"] and not status["pending_recovery"] and not status["pending_deployment_event"]

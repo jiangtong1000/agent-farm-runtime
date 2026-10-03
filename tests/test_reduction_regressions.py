@@ -98,4 +98,7 @@ def test_reconcile_report_json_contract_is_unchanged(tmp_path, monkeypatch, caps
     monkeypatch.setattr("agent_farm_runtime.adapters.local_process.LocalProcessExecutor", lambda _: FakeExecutor())
     args = build_parser().parse_args(["--project", str(tmp_path), "reconcile"])
     assert args.func(args) == 0
-    assert capsys.readouterr().out == json.dumps(payload, sort_keys=True) + "\n"
+    from datetime import datetime
+    emitted = json.loads(capsys.readouterr().out)
+    assert datetime.fromisoformat(emitted.pop("ts")).utcoffset().total_seconds() == 0
+    assert emitted == json.loads(json.dumps(payload))

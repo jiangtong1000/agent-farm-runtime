@@ -1,5 +1,6 @@
 """Opt-in tmux canaries confined to a disposable socket; never use the default server."""
 from datetime import datetime, timezone
+from copy import deepcopy
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,7 @@ import pytest
 from agent_farm_runtime.access import Access
 from agent_farm_runtime.access.contract import AccessError, farm_id, markers
 from agent_farm_runtime.access.observations import Observations
+from agent_farm_runtime.access.roles import observe_role
 
 
 pytestmark = pytest.mark.skipif(
@@ -56,10 +58,15 @@ def record_for(path):
             "published_at": datetime.now(timezone.utc).isoformat()}
 
 
-def test_exact_session_window_markers_and_returned_attachment(private_tmux):
+@pytest.mark.parametrize("version", [1, 2])
+def test_exact_session_window_markers_and_returned_attachment(private_tmux, version):
     path, run_argv, run = private_tmux
     record = record_for(path)
     obs = Observations()
+    if version == 2:
+        pid = int(run("display-message", "-p", "-t", "=master:main", "#{pane_pid}").stdout)
+        record.update(schema_version=2, generation="one", previous_record_sha256=None,
+                      endpoint_role=observe_role(obs, record["control"], "interactive", pid))
     obs.bind(record)
     assert obs.environment(record) == markers(record)
     argv = Access.verified(record)["attachment"]["argv"]
@@ -69,6 +76,7 @@ def test_exact_session_window_markers_and_returned_attachment(private_tmux):
     out = run_argv([argv[0], "-C", *argv[1:]],
                    input="display-message -p '#{session_id} #{window_id}'\ndetach-client\n")
     assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "%session-changed" in out.stdout, out.stdout
     control = record["control"]
     assert control["session_id"] + " " + control["window_id"] in out.stdout
     assert run("display-message", "-p", "-t", "=master-other:", "#{session_name}").stdout.strip() == "master-other"
@@ -120,3 +128,22 @@ def test_observations_and_attach_do_not_start_a_missing_server(private_tmux):
             out = run_argv(argv)
             assert out.returncode != 0, (argv, out.stdout)
             assert {p.name: p.stat().st_ino for p in Path(path).parent.iterdir()} == before
+
+
+def test_generation_attachment_guard_rejects_changed_server_and_markers(private_tmux):
+    path, run_argv, run = private_tmux
+    record = {**record_for(path), "schema_version": 2, "generation": "one",
+              "previous_record_sha256": None, "endpoint_role": None}
+    Observations().bind(record)
+    replaced = deepcopy(record)
+    replaced["control"]["server_pid"] += 1
+    for value in (replaced, record):
+        if value is record:
+            assert run("set-environment", "-t", record["control"]["session_id"], "FARM_ID", "other-farm").returncode == 0
+        argv = Access.verified(value)["attachment"]["argv"]
+        out = run_argv([argv[0], "-C", *argv[1:]], input="detach-client\n")
+        assert "STALE_REGISTRY: endpoint changed before attachment" in out.stdout
+        assert "%session-changed" not in out.stdout
+        # tmux 2.7 has no generic failure command; the false branch is a
+        # diagnostic command. Exit zero here does not mean an attachment occurred.
+        assert out.returncode == 0

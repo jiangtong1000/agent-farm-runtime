@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+from agent_farm_runtime.adapters.claude import ClaudeClusterConfig
 from agent_farm_runtime.adapters.codex import (
     CodexClusterConfig,
     CodexTmuxExecutor,
     render_launch_script,
+    render_resume_script,
 )
 from agent_farm_runtime.doctor import run_doctor
 from agent_farm_runtime.models import Lease, Receipt, ReceiptStatus, Task, TaskState
@@ -250,3 +256,63 @@ def test_launch_records_pid_identity_and_scopes_session_id_to_that_pid(tmp_path)
         p.write_text(s)
         assert subprocess.run(["bash", "-n", str(p)]).returncode == 0
         p.unlink()
+
+
+@pytest.mark.parametrize("config_type,prefix,model_flag,effort_flag", [
+    (CodexClusterConfig, "FARM_CODEX", "-m", "-c"),
+    (ClaudeClusterConfig, "FARM_CLAUDE", "--model", "--effort"),
+])
+def test_worker_model_pins_extend_default_or_custom_command(
+    monkeypatch, config_type, prefix, model_flag, effort_flag,
+):
+    monkeypatch.delenv(prefix + "_CMD", raising=False)
+    monkeypatch.setenv(prefix + "_MODEL", "example model;$(do-not-execute)")
+    monkeypatch.setenv(prefix + "_EFFORT", "medium")
+    cfg = config_type.from_env()
+    argv = shlex.split(cfg.codex_cmd)
+    assert argv[:len(shlex.split(config_type().codex_cmd))] == shlex.split(config_type().codex_cmd)
+    assert argv[argv.index(model_flag) + 1] == "example model;$(do-not-execute)"
+    assert argv[argv.index(effort_flag) + 1] == (
+        'model_reasoning_effort="medium"' if config_type is CodexClusterConfig else "medium"
+    )
+    monkeypatch.setenv(prefix + "_CMD", "custom-cli exec")
+    assert config_type.from_env().codex_cmd.startswith("custom-cli exec ")
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("config_type", [CodexClusterConfig, ClaudeClusterConfig])
+def test_worker_prelude_reads_farm_identity_and_dedicated_home(tmp_path, resume, config_type):
+    if not shutil.which("bash"):
+        pytest.skip("worker scripts require bash")
+    home = tmp_path / "literal $HOME; application state"
+    cfg = config_type(home=str(home), session_id_capture_delay=0,
+                     path_prelude='export PRELUDE_ID="$FARM_WORKER_ID:$FARM_TASK_ID:$FARM_LEASE_ID"\n'
+                                  f'export PRELUDE_HOME="${config_type.home_env}"')
+    sid = tmp_path / ".sid"
+    sid.write_text("01a00000-0000-7000-8000-000000000000")
+    receipt = tmp_path / ".farm" / "runtime" / "receipts" / "W1.json"
+    code = "import json, os; print(json.dumps({k: os.environ[k] for k in " + repr(
+        ["PRELUDE_ID", "PRELUDE_HOME", "FARM_TASK_PATH", config_type.home_env]) + "}))"
+    common = dict(cfg=cfg, workspace=str(tmp_path), worker_id="W1", task_id="T1", lease_id="L1",
+                  receipt_path=str(receipt), sid_path=str(sid), log_name="worker.log",
+                  pid_file=str(tmp_path / "worker.pid"),
+                  invocation=lambda prompt: shlex.join([sys.executable, "-c", code]))
+    script = (render_resume_script(**common, wake_msg="wake") if resume
+              else render_launch_script(**common, brief="brief"))
+    assert script.index("export FARM_WORKER_ID=") < script.index("export " + config_type.home_env + "=")
+    assert script.index("export " + config_type.home_env + "=") < script.index("export PRELUDE_ID=")
+    proc = subprocess.run(["bash"], input=script, text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    observed = json.loads((tmp_path / "worker.log").read_text())
+    assert observed["PRELUDE_ID"] == "W1:T1:L1"
+    assert observed["PRELUDE_HOME"] == observed[config_type.home_env] == str(home)
+    assert observed["FARM_TASK_PATH"] == str(tmp_path / ".farm" / "tasks" / "T1.json")
+
+
+def test_claude_does_not_inherit_codex_prelude_or_home(monkeypatch):
+    monkeypatch.setenv("FARM_CODEX_PATH_PRELUDE", "export CODEX_ONLY=1")
+    monkeypatch.setenv("FARM_CODEX_HOME", "/example/codex-home")
+    monkeypatch.delenv("FARM_CLAUDE_PATH_PRELUDE", raising=False)
+    monkeypatch.delenv("FARM_CLAUDE_HOME", raising=False)
+    cfg = ClaudeClusterConfig.from_env()
+    assert cfg.path_prelude == "" and cfg.home == ""

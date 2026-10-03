@@ -48,9 +48,10 @@ def _pythonpath() -> str:
 class Harness:
     """One farm, one task, one in-process reconciler, one fake scheduler."""
 
-    def __init__(self, tmp_path: Path, monkeypatch):
+    def __init__(self, tmp_path: Path, monkeypatch, *, example=EXAMPLE, worker=None, task_id=TID):
+        self.task_id = task_id
         self.ws = tmp_path / "ws"
-        shutil.copytree(EXAMPLE, self.ws)
+        shutil.copytree(example, self.ws)
         self.project = tmp_path / "farm"
         self.state = tmp_path / "fake_slurm.json"
         self.wrapper = tmp_path / "farm-wrapper"
@@ -63,7 +64,7 @@ class Harness:
                         '[scheduler]\nkind = "slurm"\nsqueue = "squeue"\nsacct = "sacct"\nsbatch = "sbatch"\n'
                         'accounting_stores_comment = true\ndependency_kill_invalid = true\n'
                         f'[paths]\nfarm_wrapper = "{self.wrapper}"\n')
-        monkeypatch.setenv("PATH", str(FAKE) + os.pathsep + os.environ["PATH"])
+        monkeypatch.setenv("PATH", str(FAKE) + os.pathsep + str(Path(PYTHON).parent) + os.pathsep + os.environ["PATH"])
         monkeypatch.setenv("FAKE_SLURM_STATE", str(self.state))
         monkeypatch.setenv("FARMKIT_SITE", str(site))
         monkeypatch.setenv("FIVE_ARM_WS", str(self.ws))
@@ -75,8 +76,8 @@ class Harness:
         self.paths = FarmPaths(self.project / ".farm")
         self.paths.ensure()
         self.store = TaskStore(self.paths)
-        self.store.create(Task(TID, "five-arm study", "runs + selection + afqmc", "all steps verified",
-                               metadata={"command": f"{shlex.quote(PYTHON)} {shlex.quote(str(HERE / 'worker.py'))}",
+        self.store.create(Task(task_id, "synthetic integration study", "verified outputs", "all steps verified",
+                               metadata={"command": f"{shlex.quote(PYTHON)} {shlex.quote(str(worker or HERE / 'worker.py'))}",
                                          "cwd": str(self.ws), "workspace": str(self.ws)}))
         self.executor = LocalProcessExecutor(self.paths.runtime)
         self.rec = Reconciler(self.paths, self.executor,
@@ -91,7 +92,7 @@ class Harness:
         return report
 
     def task(self) -> Task:
-        return self.store.get(TID)
+        return self.store.get(self.task_id)
 
     def wake(self) -> Task:
         """One worker generation: launch (or resume), let it finish, apply its receipt."""

@@ -29,4 +29,43 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
       # Portable inspection/contracts only, not Linux process/tmux actuation.
-      - run: python -m pytest -q tests/test_portability.py
+      - run: python -m pytest -q tests/test_portability.py tests/test_connect_portability.py
+
+  tmux-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux-version: ["2.7", "distro"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - name: Install tmux and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux openssh-server libevent-dev libncurses-dev build-essential bison pkg-config
+          sudo mkdir -p /run/sshd
+      - name: Build oldest supported tmux
+        if: matrix.tmux-version == '2.7'
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 2 https://github.com/tmux/tmux/releases/download/2.7/tmux-2.7.tar.gz -o tmux-2.7.tar.gz
+          echo '9ded7d100313f6bc5a87404a4048b3745d61f2332f99ec1400a7c4ed9485d452  tmux-2.7.tar.gz' | sha256sum --check
+          tar -xzf tmux-2.7.tar.gz
+          cd tmux-2.7
+          ./configure --prefix="$RUNNER_TEMP/tmux-2.7-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-2.7-install/bin" >> "$GITHUB_PATH"
+      - name: Exercise isolated runtime and public access lifecycle
+        env:
+          FARM_RUN_ACCESS_TMUX_CANARY: "1"
+          FARM_RUN_TMUX_CANARY: "1"
+          FARM_RUN_SSH_CANARY: "1"
+        run: |
+          tmux -V
+          python -m pytest -q tests/test_runtime_canary.py tests/test_access_tmux_canary.py tests/test_access_lifecycle_canary.py tests/test_connect.py tests/test_connect_ssh_canary.py

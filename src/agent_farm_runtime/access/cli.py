@@ -24,15 +24,17 @@ def command(args) -> int:
             registry.initialize(attest_shared_storage=args.attest_shared_storage)
             value = result("INITIALIZED", None, "registry_ready", "Registry initialized; no target published")
         elif args.access_action == "resolve":
-            value = access.resolve(target)
+            value = access.resolve(target, role=args.role)
         else:
             paths = FarmPaths(Path(args.project).resolve() / ".farm")
             if args.access_action == "verify":
-                value = access.verify(paths, target, expected_record=args.expected_record)
+                value = access.verify(paths, target, expected_record=args.expected_record, role=args.role)
             else:
                 value = access.publish(paths, target, job_id=args.job_id, control_session=args.control_session,
                                        control_socket=args.control_socket, default_window=args.default_window,
-                                       expected_epoch=args.expected_epoch)
+                                       expected_epoch=args.expected_epoch, generation=args.generation,
+                                       expected_current=args.expected_current, role=args.role,
+                                       role_pid=args.role_pid)
     except AccessError as exc:
         value = result(exc.state, target, exc.reason, str(exc))
     except PermissionError:
@@ -49,7 +51,7 @@ def command(args) -> int:
 def add_parser(sub) -> None:
     parser = sub.add_parser("access", help="publish/resolve/verify human-facing control endpoints; never attach or provision")
     actions = parser.add_subparsers(dest="access_action", required=True)
-    for name in ("init", "publish", "resolve", "verify"):
+    for name in ("init", "publish", "adopt", "resolve", "verify"):
         action = actions.add_parser(name)
         action.add_argument("--registry", help="absolute persistent shared registry (or FARM_ACCESS_REGISTRY)")
         action.add_argument("--json", action="store_true", help="structured JSON (also the default)")
@@ -58,12 +60,19 @@ def add_parser(sub) -> None:
                                 help="attest storage is persistent/shared and supports cooperative locks/fsync/rename")
         else:
             action.add_argument("--target", required=True, help="NAME or SITE/FARM permanently bound to one farm/root")
-        if name == "publish":
+        if name in {"publish", "adopt"}:
             action.add_argument("--job-id", required=True, help="exact numeric Slurm allocation ID")
             action.add_argument("--control-session", required=True, help="exact human-facing tmux session name")
             action.add_argument("--control-socket", help="absolute tmux socket path; omitted means the default server")
             action.add_argument("--default-window", help="exact window name, or numeric window index")
             action.add_argument("--expected-epoch", help="optional execution_epoch precondition")
+            action.add_argument("--generation", required=name == "adopt", help="immutable access generation ID, independent of execution epoch")
+            action.add_argument("--expected-current", required=name == "adopt", help="CAS predecessor record digest, or none for first publication")
+            action.add_argument("--role-pid", type=int, required=name == "adopt", help="PID of existing Master/daemon process to adopt; never launches another")
+        if name != "init":
+            action.add_argument("--role", choices=("interactive", "daemon"),
+                                default="interactive" if name == "adopt" else None,
+                                help="exact endpoint role; daemon access must be explicit")
         if name == "verify":
             action.add_argument("--expected-record", help="record_sha256 returned by resolve; reject a changed candidate")
         action.set_defaults(func=command)

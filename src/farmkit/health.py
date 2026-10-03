@@ -22,10 +22,12 @@ def findings(status: dict, *, now: float | None = None) -> list[dict]:
         out.append({"check": "loop advancing", "level": level(age <= 3 * interval),
                     "detail": f"last tick {int(age)} s ago (interval {int(interval)} s)"})
 
-    if "source_matches" in status:
-        out.append({"check": "code matches manifest", "level": level(bool(status["source_matches"])),
-                    "detail": "CLI source equals the daemon's recorded source" if status["source_matches"]
-                    else "CLI and daemon run different code; controlled restart required"})
+    source_matches = status.get("source_matches")
+    out.append({"check": "code matches manifest",
+                "level": "unknown" if source_matches is None else level(source_matches),
+                "detail": ("no daemon manifest yet" if not status.get("deployment") else "source comparison unavailable")
+                if source_matches is None else ("CLI source equals the daemon's recorded source" if source_matches
+                else "CLI and daemon run different code; controlled restart required")})
     phase = (status.get("handoff") or {}).get("phase")
     if phase:
         out.append({"check": "handoff", "level": "warn" if phase in {"draining", "released"} else "ok",

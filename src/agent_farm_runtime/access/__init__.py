@@ -15,11 +15,12 @@ from ..lifecycle import daemon_alive
 from ..locking import task_mutation_lock
 from ..provenance import deployment_stamp, runtime_identity
 from ..store import FarmPaths
-from .contract import (AccessError, EPOCH, SCHEMA_VERSION, SHA256, digest, farm_id, identifier,
+from .contract import (AccessError, EPOCH, SCHEMA_VERSION, GENERATION_SCHEMA_VERSION, SHA256, digest, farm_id, identifier,
                        markers, require, result, target_name, timestamp, validate_record)
 from .observations import Observations
 from .allocation import attested_scheduler, running_allocation
 from .registry import Registry, persistent_path, read_json
+from .roles import observe_role
 
 
 def manifest_for(paths: FarmPaths) -> dict:
@@ -109,27 +110,34 @@ class Access:
         require(self.observations.control(control["socket"], control["session"], control["default_window"]) == control,
                 "STALE_REGISTRY", "control_replaced", "Control socket/server/session/window identity changed")
         require(self.observations.environment(record) == markers(record), "CONFLICT", "marker_mismatch", "Control session markers differ")
+        role = record.get("endpoint_role")
+        if role is not None:
+            require(role["kind"] != "interactive" or role["pid"] != manifest["pid"],
+                    "CONFLICT", "daemon_only", "The reconciler process cannot serve as the interactive Master")
+            require(observe_role(self.observations, control, role["kind"], role["pid"]) == role,
+                    "STALE_REGISTRY", "role_replaced", "The adopted role process/pane identity changed; explicitly adopt a new generation")
         require(self.observations.control(control["socket"], control["session"], control["default_window"]) == control,
                 "STALE_REGISTRY", "control_replaced", "Control endpoint changed while reading its markers")
         require(manifest_for(paths) == manifest, "PENDING", "deployment_changed", "Deployment changed during verification")
 
-    def resolve(self, target: str) -> dict:
+    def resolve(self, target: str, *, role: str | None = None) -> dict:
         target_name(target)
-        pointer, record = self.registry.current(target)
+        pointer, record = self.registry.current(target, role=role)
         paths = FarmPaths(Path(record["farm_root"]))
         manifest = manifest_for(paths)
         match_manifest(record, manifest)
-        require(self.registry.current(target) == (pointer, record), "STALE_REGISTRY", "pointer_changed", "Current pointer changed during resolution")
+        require(self.registry.current(target, role=role) == (pointer, record), "STALE_REGISTRY", "pointer_changed", "Current pointer changed during resolution")
         # A login host can do this step. It cannot certify remote tmux/process state.
         return result("RESOLVED", target, "verification_required", "Candidate only; run verify on the recorded host",
+                      schema_version=record["schema_version"],
                       record=record, record_sha256=pointer["record_sha256"], verification={
                           "host": record["runtime_host"], "project": str(paths.root.parent),
                           "registry": str(self.registry.root), "target": target,
-                          "expected_record": pointer["record_sha256"]})
+                          "expected_record": pointer["record_sha256"], **({"role": role} if role is not None else {})})
 
-    def verify(self, paths: FarmPaths, target: str, *, expected_record: str | None = None) -> dict:
+    def verify(self, paths: FarmPaths, target: str, *, expected_record: str | None = None, role: str | None = None) -> dict:
         target_name(target)
-        pointer, record = self.registry.current(target)
+        pointer, record = self.registry.current(target, role=role)
         if expected_record is not None:
             identifier(expected_record, SHA256)
             require(pointer["record_sha256"] == expected_record, "STALE_REGISTRY", "expected_record", "Resolved candidate is no longer current")
@@ -137,29 +145,54 @@ class Access:
         manifest = manifest_for(paths)
         match_manifest(record, manifest)
         self.live(paths, manifest, record)
-        require(self.registry.current(target) == (pointer, record), "STALE_REGISTRY", "pointer_changed", "Current pointer changed during verification")
+        require(self.registry.current(target, role=role) == (pointer, record), "STALE_REGISTRY", "pointer_changed", "Current pointer changed during verification")
         return self.verified(record)
 
     @staticmethod
     def verified(record: dict) -> dict:
         control = record["control"]
         target = control["session_id"] + (":" + control["window_id"] if control["window_id"] is not None else "")
+        condition = "1"
+        rejected = []
+        if record["schema_version"] == GENERATION_SCHEMA_VERSION:
+            # Evaluate inside the existing tmux server immediately before attach.
+            # Values below use identifier-only alphabets; no arbitrary paths or
+            # commands can enter the tmux format expression.
+            expected = {"pid": str(control["server_pid"]), "session_id": control["session_id"],
+                        "FARM_ID": record["farm_id"], "FARM_EXECUTION_EPOCH": record["execution_epoch"],
+                        "FARM_SOURCE_SHA256": record["source_sha256"], "FARM_ACCESS_TARGET": record["target"]}
+            if record.get("endpoint_role") is not None:
+                expected["FARM_ENDPOINT_ROLE"] = record["endpoint_role"]["kind"]
+            for key, value in expected.items():
+                condition = "#{&&:" + condition + ",#{==:#{" + key + "}," + value + "}}"
+            rejected = ["display-message -p 'STALE_REGISTRY: endpoint changed before attachment; resolve again'"]
         return result("VERIFIED", record["target"], "exact_match", "Point-in-time verification; no attach performed",
+                      schema_version=record["schema_version"],
                       record=record, record_sha256=digest(record), attachment={
                           "host": record["runtime_host"],
                           # Unlike attach-session, if-shell cannot start a server
                           # in tmux 2.7. -F evaluates a format, never a shell.
                           "argv": ["tmux", "-S", control["socket"], "if-shell", "-F", "-t", target,
-                                   "1", f"attach-session -t '{target}'"]})
+                                   condition, f"attach-session -t '{target}'", *rejected]})
 
     def publish(self, paths: FarmPaths, target: str, *, job_id: str, control_session: str,
                 control_socket: str | None = None, default_window: str | None = None,
-                expected_epoch: str | None = None) -> dict:
+                expected_epoch: str | None = None, generation: str | None = None,
+                expected_current: str | None = None, role: str | None = None,
+                role_pid: int | None = None) -> dict:
         target_name(target)
         identifier(job_id, r"[1-9][0-9]*")
         identifier(control_session)
         if default_window is not None:
             identifier(default_window)
+        require((generation is None) == (expected_current is None), "CONFLICT", "generation_precondition",
+                "Endpoint generations require both --generation and --expected-current DIGEST (or none initially)")
+        if generation is not None:
+            identifier(generation, EPOCH)
+            if expected_current != "none":
+                identifier(expected_current, SHA256)
+        require((role is None) == (role_pid is None) and (role is None or generation is not None),
+                "CONFLICT", "role_precondition", "Adoption requires an explicit role process PID, generation and CAS predecessor")
         configuration = self.registry.configuration(writing=True)
         self.local(manifest_for(paths))  # Validate before creating access locks/directories.
         directory = self.registry.target_dir(target, create=True)
@@ -186,19 +219,40 @@ class Access:
                       "runtime_host": manifest["host"], "protocol_version": manifest["protocol_version"],
                       "source_sha256": manifest["source_sha256"], "owner_uid": configuration["owner_uid"],
                       "scheduler": scheduler, "control": control, "published_at": self.clock().isoformat()}
+            if generation is not None:
+                require(role != "interactive" or role_pid != manifest["pid"], "CONFLICT", "daemon_only",
+                        "The reconciler cannot be adopted as the interactive Master; select the existing Master process")
+                record.update(schema_version=GENERATION_SCHEMA_VERSION, generation=generation,
+                              previous_record_sha256=None if expected_current == "none" else expected_current,
+                              endpoint_role=observe_role(self.observations, control, role, role_pid) if role is not None else None)
             validate_record(record, target, record["execution_epoch"])
             # Conflicting bindings/generations fail before setting any tmux markers.
             binding = directory / "binding.json"
             if binding.exists() or binding.is_symlink():
                 require(read_json(binding) == self.registry.binding(record), "CONFLICT", "target_binding", "Target already belongs to another farm")
-            instance = directory / "epochs" / f"{record['execution_epoch']}.json"
+            instance = self.registry.record_path(directory, record)
             if instance.exists() or instance.is_symlink():
                 prior = validate_record(read_json(instance), target, record["execution_epoch"])
                 record["published_at"] = prior["published_at"]
-                require(record == prior, "CONFLICT", "epoch_publication", "Same epoch has a different immutable endpoint")
-            current = directory / "current.json"
+                require(record == prior, "CONFLICT", "epoch_publication" if generation is None else "generation_publication",
+                        "This immutable publication already identifies another endpoint; choose a new access generation")
+            current = self.registry.pointer_path(directory, role)
+            current_pointer = None
             if current.exists() or current.is_symlink():
-                self.registry.current(target)  # A broken pointer is never silently repaired.
+                current_pointer, current_record = self.registry.current(target, role="daemon" if role == "daemon" else None)
+                require(not current_record.get("endpoint_role") or role is not None,
+                        "CONFLICT", "role_required", "An adopted target cannot be downgraded to an untyped endpoint")
+            if generation is not None:
+                observed = current_pointer["record_sha256"] if current_pointer else None
+                if observed == digest(record):
+                    # An identical retry after the pointer was committed performs no new publication.
+                    self.live(paths, manifest, record)
+                    return self.verified(record)
+                require(observed == record["previous_record_sha256"], "STALE_REGISTRY", "expected_current",
+                        "Current endpoint changed; resolve the target and explicitly review a new rotation")
+            elif current_pointer is not None:
+                require(current_pointer["schema_version"] == SCHEMA_VERSION, "CONFLICT", "generation_required",
+                        "This target uses access generations; publish with --generation and --expected-current")
             self.observations.bind(record)
             self.live(paths, manifest, record)
             record = self.registry.prepare(directory, record)

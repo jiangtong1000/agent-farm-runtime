@@ -16,8 +16,8 @@ Two subcommands, both stdlib-only:
 
 Site profile keys used here (see sites/example.toml):
   [python] runtime_interpreter
-  [farm_defaults] executor, interval, grace_seconds, max_auto_restarts   (optional)
-  [executor.codex] cmd, path_prelude      [executor.claude] cmd, path_prelude   (optional)
+  [farm_defaults] executor, interval, grace_seconds, max_auto_restarts, log (optional)
+  [executor.codex/claude] model, effort, home, cmd, path_prelude, bin_dir (optional)
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ WRAPPER = r'''#!/usr/bin/env bash
 # Release: {tag} ({commit}; protocol {protocol}; exported {exported}).
 # Rendered by tools/release.py from site {site_name}; do not edit by hand.
 set -euo pipefail
-export PATH="{python_dir}:$PATH"
-export PYTHONPATH="{src}"
+export PATH={python_dir}:"$PATH"
+export PYTHONPATH={src}
 # Parse with the CLI itself so help stays read-only and abbreviated options
 # cannot accidentally bypass the activation check. Never pass this flag to workers.
 # Runtime is stdlib-only. Ignore cwd/Python search-path injection and skip site
@@ -77,10 +77,16 @@ RUN_RECONCILER = '''#!/bin/bash
 # Rendered by tools/release.py from site {site_name} for release {tag}; do not edit by hand.
 set -euo pipefail
 export PATH={path_export}
-{codex_exports}{claude_exports}exec {wrapper} \\
+{codex_exports}{claude_exports}# Keep a parent shell so an exit is reported even if the daemon fails.
+set +e
+{wrapper} \\
   --project {project} reconcile \\
   --executor {executor} --session {farm} --tmux-socket {farm} \\
-  --loop --interval {interval} --grace-seconds {grace} --auto-unblock --max-auto-restarts {restarts}
+  --loop --interval {interval} --grace-seconds {grace} --auto-unblock --max-auto-restarts {restarts} \\
+  --log {log}
+_RC=$?
+printf 'RECONCILER_EXITED rc=%s log=%s\\n' "$_RC" {log} >&2
+exit "$_RC"
 '''
 
 
@@ -141,7 +147,8 @@ def render_wrapper(site: dict, release_dir: Path, site_name: str) -> str:
     return WRAPPER.format(
         tag=release["tag"], commit=release["git_commit"], protocol=release["protocol_version"],
         exported=release["exported_at"][:10], site_name=site_name,
-        python=python, python_dir=str(Path(python).parent), src=str(release_dir / "src"),
+        python=shlex.quote(python), python_dir=shlex.quote(str(Path(python).parent)),
+        src=shlex.quote(str(release_dir / "src")),
         read_only="{" + ", ".join(f'"{c}"' for c in READ_ONLY_COMMANDS) + "}", sha=release["source_sha256"])
 
 
@@ -160,15 +167,19 @@ def render_run_reconciler(site: dict, release_dir: Path, site_name: str, farm_di
             lines += f"export {env_prefix}_PATH_PRELUDE={shlex.quote(cfg['path_prelude'])}\n"
         if cfg.get("cmd"):
             lines += f"export {env_prefix}_CMD={shlex.quote(cfg['cmd'])}\n"
+        for key in ("model", "effort", "home"):
+            if cfg.get(key):
+                lines += f"export {env_prefix}_{key.upper()}={shlex.quote(cfg[key])}\n"
         if cfg.get("bin_dir"):
             path_parts.append(cfg["bin_dir"])
         exports[name] = lines
     return RUN_RECONCILER.format(
-        farm=farm_dir.name, site_name=site_name, tag=release["tag"],
-        path_export=":".join(path_parts) + ":$PATH",
+        farm=shlex.quote(farm_dir.name), site_name=site_name, tag=release["tag"],
+        path_export=shlex.quote(":".join(path_parts)) + ':"$PATH"',
         codex_exports=exports["codex"], claude_exports=exports["claude"],
-        wrapper=str(wrapper), project=str(farm_dir),
-        executor=defaults.get("executor", "codex-tmux"), interval=defaults.get("interval", 30),
+        wrapper=shlex.quote(str(wrapper)), project=shlex.quote(str(farm_dir)),
+        log=shlex.quote(str(defaults.get("log") or farm_dir / "reconciler.log")),
+        executor=shlex.quote(defaults.get("executor", "codex-tmux")), interval=defaults.get("interval", 30),
         grace=defaults.get("grace_seconds", 120), restarts=defaults.get("max_auto_restarts", 3))
 
 

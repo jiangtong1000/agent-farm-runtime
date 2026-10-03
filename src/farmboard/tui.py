@@ -88,6 +88,8 @@ def run_tui(reader, *, farm: str, farm_wrapper: str, project: str, actor: str, r
                 return
             text = [f"{c.id} rev {c.revision} · {c.state} · {c.waiting_on or ''}", f"workspace {c.workspace}",
                     f"objective: {c.objective}", "", render_attempts(c) if c.attempts else "(no attempts)"]
+            if c.attention_detail:
+                text.insert(1, c.attention_detail)
             for label, path in (("evidence", c.evidence), ("review", c.review), ("checkpoint", c.checkpoint)):
                 if path:
                     text.append(f"{label}: {path}")

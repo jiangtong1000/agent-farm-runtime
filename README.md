@@ -99,6 +99,11 @@ Start subsequent Master sessions in that directory and say "catch up"; the Maste
 reads the saved instructions and checks current runtime evidence before reporting.
 Other agent hosts should load the same saved `MASTER.md` explicitly.
 
+The Master adopts the explicitly selected interactive session; a separate daemon
+server does not require another Master. Every tmux operation names its socket.
+For agent-host permission setup, see the
+[Master permission guide](templates/RUNTIME_MASTER.md#agent-host-permission-setup).
+
 The Owner supplies research decisions and authority as needed; deployment commands
 and the full operating procedure do not need to be pasted into each conversation.
 
@@ -130,6 +135,11 @@ job. Runtime and farmkit require Python 3.11+ and use the standard library.
 The execution backend requires Linux and POSIX filesystem operations; tmux workers
 also need tmux, bash 4.4+, and the chosen agent CLI configured on the worker host.
 Slurm steps require scheduler access. See [portability](docs/PORTABILITY.md).
+
+For a complete synthetic lifecycle, use [the smoke test](examples/smoke_test/README.md).
+Before attesting to a storage backend, run `farm storage-probe /existing/directory --json`
+and archive the local operation results alongside separate shared-storage and
+cross-node evidence.
 
 For the interactive board, install the optional dependency from the same revision:
 
@@ -232,12 +242,14 @@ permanently bound to one farm/root; other farms use different targets. The acces
 immutable records on shared storage and requires exact deployment, epoch, job
 and tmux identity checks. `access resolve` returns a candidate; `access verify`
 on the recorded host returns attachment arguments only when all checks pass.
-See the [access protocol and runbook](docs/ACCESS_PROTOCOL.md). A local connection
-client and terminal UI are separate work; these commands do not attach or start
-sessions.
+See the [access protocol and runbook](docs/ACCESS_PROTOCOL.md). To adopt an existing
+Master, use `access adopt` with its exact process identity; replacement endpoints
+use immutable access generations and an expected-current digest. `access resolve`
+and `access verify` remain read-only. The [portable connection client](docs/CONNECT.md)
+provides `farm connect TARGET --config FILE` over native OpenSSH.
 The deployment records the runtime hostname and exact Slurm node separately,
 using launcher identity captured at reconciler startup. A movable local shorthand
-belongs to the future connection client, not the remote registry.
+belongs in local connection configuration, not the remote registry.
 
 ## Inspect, review and continue
 

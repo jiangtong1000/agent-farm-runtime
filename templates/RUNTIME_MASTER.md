@@ -43,6 +43,19 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
   completion notifies this Master and permits it to continue; tmux alone does not
   provide model wakeups. Report what is ready and discuss research with the Owner.
 - Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and use
+- Adopt the Owner's explicitly selected existing interactive Master session. Record
+  its exact socket and session; validate them before publication. A separate daemon
+  server may run the reconciler, but setup must not launch a second Master or publish
+  a daemon-only session as the interactive endpoint. Missing or ambiguous session
+  identity requires an explicit selection, never a guessed replacement.
+- Every tmux command must specify `-S /absolute/socket` or `-L saved-socket-name`,
+  including list, has-session, new-window and attach. `$TMUX` can refer to this
+  Master's own server, while `TMUX_TMPDIR` affects named socket lookup. Save both
+  socket and host in MASTER.md. Prefer session-level access; bind an exact window
+  only when its continued existence is required.
+- Use [the smoke example](../examples/smoke_test/README.md) for end-to-end validation
+  and [the host allocation template](host_job.sbatch) when Slurm holds the farm node.
+- Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and use
   the Owner's chosen validation approach. Staged validation on the actual farm is
   supported; a separate disposable canary is not a prerequisite. Record that choice
   in this farm's operating notes and proceed under the existing authorization.
@@ -50,6 +63,32 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
   validate further operation and turnover as those stages occur. Report deployment
   identity, what was verified, current work and checks not yet exercised. Do not
   request the same authorization again or bypass a failed protocol check.
+
+## Agent-host permission setup
+
+Conversational authority and host-enforced permission rules are separate. For
+Claude Code, the Owner can review these path-scoped examples in `/permissions`
+or local settings, replacing every path with the pinned deployment:
+
+```json
+{"permissions":{"allow":[
+  "Bash(/shared/farms/bin/farm *)",
+  "Bash(/shared/farms/example/run_reconciler.sh)",
+  "Bash(tmux -S /local/farm-control/socket *)",
+  "Bash(/shared/env/bin/farmkit *)",
+  "Bash(/shared/env/bin/farmboard *)"
+]}}
+```
+
+Include the deployment directory and site-profile file in approved file access.
+Run daemon startup as a small standalone command so its purpose is reviewable.
+Auto mode may reject agent-executor commands or sandbox settings even after chat
+authorization; a matched allow rule cannot override managed deny rules. If denied,
+report the exact command and reason and request a specific Owner decision through
+the host's permission interface. Do not disguise the command or grant yourself
+broader permissions. Already authorized operations need no repeated confirmation.
+Use `farmkit watch` for background notifications. See Claude Code's
+[permission reference](https://code.claude.com/docs/en/permissions).
 
 ## Research and resource use
 
@@ -99,7 +138,7 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
   inspect `scheduler_attestation` and the completed tick before publication.
   Claim/recovery clear the old attestation. Never derive NodeName by shortening
   a hostname, copy another node's allocation identity, or repoint a target to a
-  different farm. Local connection aliases belong to the future client.
+  different farm. Local connection configuration is described in docs/CONNECT.md.
 
 ## Every day
 - Look at the board (`farmkit board --project <farm>` in tmux, or `--html`).
@@ -125,4 +164,4 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
 farm --project <farm> task-show <id> --summary · task-ruling · task-accept · task-rework · task-amend · task-rotate
 farmkit watch · farmkit health · farmkit board
 farm init · farm task-create · farm stop · farm restart · tools/release.py
-farm access init · access publish · access resolve · access verify
+farm storage-probe · access init · access adopt · access publish · access resolve · access verify · connect

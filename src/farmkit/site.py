@@ -21,8 +21,7 @@ DEFAULTS = {
     "scheduler": {"kind": "slurm", "squeue": "squeue", "sacct": "sacct", "sbatch": "sbatch",
                   "accounting_stores_comment": True, "dependency_kill_invalid": True,
                   "barrier_partition": None, "barrier_time": "0:05:00", "poll_interval_s": 30},
-    "python": {}, "executor": {}, "worker": {"rotate_when_input_tokens_over": 120000,
-                                            "rotate_after_wakes": 12}, "paths": {},
+    "python": {}, "executor": {}, "farm_defaults": {}, "paths": {},
 }
 
 
@@ -44,7 +43,8 @@ class Site:
 
     @property
     def worker(self) -> dict:
-        return self.data["worker"]
+        """Legacy user data only; worker settings never controlled the runtime."""
+        return self.data.get("worker", {})
 
     @property
     def paths(self) -> dict:

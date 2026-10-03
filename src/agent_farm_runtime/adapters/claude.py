@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from typing import ClassVar
 
 from .codex import CodexClusterConfig, CodexTmuxExecutor
 
@@ -26,12 +27,18 @@ class ClaudeClusterConfig(CodexClusterConfig):
     """`codex_cmd` holds the claude command line; the field name is inherited."""
 
     codex_cmd: str = "claude -p --dangerously-skip-permissions --output-format json"
+    home_env: ClassVar[str] = "CLAUDE_CONFIG_DIR"
 
     @classmethod
     def from_env(cls) -> "ClaudeClusterConfig":
         base = CodexClusterConfig.from_env()
-        return cls(codex_cmd=os.environ.get("FARM_CLAUDE_CMD", cls.codex_cmd),
-                   path_prelude=os.environ.get("FARM_CLAUDE_PATH_PRELUDE", base.path_prelude),
+        cmd = os.environ.get("FARM_CLAUDE_CMD", cls.codex_cmd)
+        for key, flag in (("FARM_CLAUDE_MODEL", "--model"), ("FARM_CLAUDE_EFFORT", "--effort")):
+            if value := os.environ.get(key):
+                cmd += f" {flag} " + shlex.quote(value)
+        return cls(codex_cmd=cmd,
+                   path_prelude=os.environ.get("FARM_CLAUDE_PATH_PRELUDE", ""),
+                   home=os.environ.get("FARM_CLAUDE_HOME", ""),
                    session_id_capture_delay=base.session_id_capture_delay,
                    max_prompt_bytes=base.max_prompt_bytes,
                    command_timeout_seconds=base.command_timeout_seconds)

@@ -15,7 +15,7 @@ class Check:
     message: str
 
 
-def run_doctor(paths: FarmPaths) -> list[Check]:
+def run_doctor(paths: FarmPaths, *, access_registry=None, access_target=None, access_sockets=()) -> list[Check]:
     checks: list[Check] = []
     store = TaskStore(paths)
     registry = WorkerRegistry(paths)
@@ -87,6 +87,8 @@ def run_doctor(paths: FarmPaths) -> list[Check]:
     else:
         try:
             recorded = json.loads(deployment.read_text())
+            if not isinstance(recorded, dict) or not isinstance(recorded.get("handoff", {}), dict):
+                raise ValueError("malformed deployment object")
             current = runtime_identity()
             if recorded.get("pending_event"):
                 checks.append(Check("FAIL", "pending deployment audit; retry the recorded handoff/startup"))
@@ -102,6 +104,10 @@ def run_doctor(paths: FarmPaths) -> list[Check]:
                 checks.append(Check("PASS", "daemon startup source matches CLI (not a daemon liveness check)"))
         except (ValueError, OSError):
             checks.append(Check("FAIL", "unreadable daemon deployment manifest"))
+    if access_registry is not None or access_target is not None or access_sockets:
+        from .access.diagnostics import diagnose
+        checks.extend(Check(level, message) for level, message in diagnose(
+            paths, registry_path=access_registry, target=access_target, sockets=access_sockets))
     if not any(c.level == "FAIL" for c in checks):
         checks.append(Check("PASS", f"{len(tasks)} task(s): no invariant violations detected"))
     return checks

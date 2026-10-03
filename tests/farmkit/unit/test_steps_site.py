@@ -76,4 +76,4 @@ def test_site_detect_by_env_and_hostname(tmp_path):
         Site.detect("unknown-host", env)
     s = Site.load(tmp_path / "alpha.toml")
     assert s.scheduler["barrier_partition"] == "test" and s.scheduler["sacct"] == "sacct"
-    assert s.worker["rotate_when_input_tokens_over"] == 120000 and s.executor("codex") == {}
+    assert s.worker == {} and s.executor("codex") == {}

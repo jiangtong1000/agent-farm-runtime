@@ -20,7 +20,7 @@ def forbid_artifact_wait(waiting_on: str) -> None:
 
 
 def _numeric(job_id: str) -> int:
-    return int(re.split(r"[^0-9]", job_id, 1)[0] or 0)
+    return int(re.split(r"[^0-9]", job_id, maxsplit=1)[0] or 0)
 
 
 def wait_reference(job_ids: list[str], *, expected_end: dict[str, float] | None = None,

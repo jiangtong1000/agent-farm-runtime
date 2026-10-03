@@ -3,26 +3,22 @@
 
 1. run `farmkit tick --checkpoint --verifiers verifiers` in the workspace,
 2. run EXACTLY the receipt command tick printed (the runtime's own receipt helper),
-3. exit.
+3. exit. The shared tick/receipt implementation is tools/local_worker.py.
 
 The runtime's LocalProcessExecutor sets FARM_RECEIPT_PATH / FARM_WORKER_ID / FARM_TASK_ID
 / FARM_LEASE_ID; the receipt helper reads them. The helper text is the runtime's
 (adapters/codex.py RECEIPT_HELPER); the codex executor drops it into the workspace,
-the local executor does not, so this worker writes it once.
+the local executor does not, so the shared worker installs it on each wake.
 """
 import json
 import os
+import runpy
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from agent_farm_runtime.adapters.codex import RECEIPT_HELPER
-
 ws = Path(os.environ["FIVE_ARM_WS"])
-helper = ws / ".farm_receipt.py"
-if not helper.exists():
-    helper.write_text(RECEIPT_HELPER)
 
 # The model's part, reduced to its mechanical core: if the master's latest ruling names
 # `farmkit release` lines, run them once (tracked by the ruling's digest) before ticking.
@@ -43,22 +39,6 @@ if task_path and Path(task_path).exists():
                     sys.exit(rel.returncode)
         applied.write_text("\n".join([*seen, ruling["sha256"]]) + "\n")
 
-tick = subprocess.run([sys.executable, "-m", "farmkit.cli", "tick", "--workspace", str(ws), "--checkpoint",
-                       "--verifiers", "verifiers"], text=True, capture_output=True, cwd=str(ws))
-(ws / "worker_last_tick.out").write_text(tick.stdout + "\n--- stderr ---\n" + tick.stderr)
-if tick.returncode != 0:
-    print(tick.stdout); print(tick.stderr, file=sys.stderr)
-    sys.exit(tick.returncode)
-
-command = None
-lines = tick.stdout.splitlines()
-for i, line in enumerate(lines):
-    if line.startswith("REPORT WITH EXACTLY THIS COMMAND"):
-        command = lines[i + 1].strip()
-if not command:
-    sys.exit("tick printed no receipt command")
-argv = shlex.split(command)
-argv[0] = sys.executable                     # "python" -> this interpreter
-receipt = subprocess.run(argv, text=True, capture_output=True, cwd=str(ws))
-(ws / "worker_last_receipt.out").write_text(receipt.stdout + receipt.stderr)
-sys.exit(receipt.returncode)
+worker = Path(__file__).resolve().parents[2] / "tools" / "local_worker.py"
+main = runpy.run_path(str(worker))["main"]
+sys.exit(main(["--workspace", str(ws), "--verifiers", "verifiers"]))

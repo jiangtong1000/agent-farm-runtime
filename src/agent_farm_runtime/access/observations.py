@@ -96,6 +96,11 @@ class Observations:
         # tmux 2.7 replaces tabs with underscores in the C locale. Use a
         # printable delimiter excluded from the accepted session names.
         parts = raw.strip().split("|")
+        # Recent tmux can succeed with an empty target context instead of an
+        # error for an exact missing session. Empty native ID AND name are
+        # positive absence; never accept its server PID as a session match.
+        require(not (len(parts) == 3 and parts[0] == parts[1] == "" and parts[2].isdigit()),
+                "SESSION_MISSING", "session_missing", "The exact control session is missing; no other session was selected")
         require(len(parts) == 3 and parts[1] == session and re.fullmatch(r"\$[0-9]+", parts[0])
                 and parts[2].isdigit(), "CONFLICT", "session_identity", "Unexpected tmux session identity")
         session_id, _, pid = parts
@@ -107,7 +112,10 @@ class Observations:
             require(all(len(row) == 3 and re.fullmatch(r"@[0-9]+", row[0]) and row[1].isdigit() for row in rows),
                     "UNREACHABLE", "window_observation", "Invalid window observation")
             matches = [row for row in rows if row[1 if window.isdecimal() else 2] == window]
-            require(matches, "SESSION_MISSING", "window_missing", "The exact default window is missing")
+            require(matches, "SESSION_MISSING", "window_missing",
+                    "The exact default window is missing. Inspect the intended Master session, then explicitly "
+                    "publish a new --generation with --expected-current using session-only binding "
+                    "(omit --default-window). Retain the old record; no execution-epoch change is needed.")
             require(len(matches) == 1, "CONFLICT", "ambiguous_window", "Default window name is not unique")
             window_id = matches[0][0]
         boot = host_identity()["boot_id"]
@@ -128,7 +136,7 @@ class Observations:
 
     def bind(self, record: dict) -> None:
         expected, observed = markers(record), self.environment(record)
-        require(all(value == expected[key] for key, value in observed.items()),
+        require(all(key in expected and value == expected[key] for key, value in observed.items()),
                 "CONFLICT", "marker_conflict", "Control session already has a different farm/epoch binding")
         control = record["control"]
         for key, value in expected.items():

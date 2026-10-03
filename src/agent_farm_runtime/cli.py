@@ -10,7 +10,7 @@ from pathlib import Path
 from .adapters.filesystem import FileLockBusy, FilesystemCapabilityError
 from .doctor import run_doctor
 from .locking import ReconcilerBusy
-from .models import Task
+from .models import Task, TaskState
 from .shadow import codex_cwds, inspect_workspace
 from .store import FarmPaths, StoreError, TaskStore, atomic_write_json
 
@@ -25,6 +25,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     paths.ensure()
     print(f"initialized {root}")
     return 0
+
+
+def cmd_storage_probe(args: argparse.Namespace) -> int:
+    from .storage_probe import probe_storage
+    result = probe_storage(Path(args.directory))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"storage probe: {result['path']}")
+        for check in result["checks"]:
+            print(f"{check['status']:7s} {check['name']}: {check['detail']}")
+        print(result["scope"])
+    return 0 if result["ok"] else 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -144,7 +157,9 @@ def task_summary(task: Task) -> dict:
         "acceptance_preview": preview(task.acceptance, 640),
         "workspace": preview(meta.get("workspace") or meta.get("cwd")),
         "lease": task.lease.__dict__ if task.lease else None,
-        "waiting_on": preview(meta.get("waiting_on")), "outcome": preview(meta.get("outcome")),
+        "waiting_on": preview(meta.get("waiting_on")) if task.state is TaskState.WAITING else None,
+        "last_wait": preview(meta.get("waiting_on")) if task.state is not TaskState.WAITING else None,
+        "outcome": preview(meta.get("outcome")),
         "last_receipt_note": preview(meta.get("last_receipt_note")),
         "runtime_error": preview(meta.get("runtime_error")),
         "recovery_hold": preview(meta.get("recovery_hold")),
@@ -244,6 +259,13 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         result = release_farm(paths, executor, request_id=args.request_id, actor=args.actor)
     else:
         result = claim_farm(paths, request_id=args.request_id, actor=args.actor)
+        # Observe after the claim commits, outside writer locks. The daemon alone
+        # resumes work; a completed scheduler job still needs worker verification.
+        from .status import farm_status
+        jobs = farm_status(paths, refresh_jobs=True)["observed_jobs"]
+        result = {**result, "job_waits": jobs,
+                  "catch_up": [job for job in jobs if job["terminal"]],
+                  "next_action": "Start the reconciler with auto-unblock enabled; inspect resumes and worker verification."}
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -287,6 +309,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         raise ValueError("reconcile interval must be finite and positive")
 
     from .locking import ReconcilerBusy, single_reconciler
+    from .reconcile_logging import reconcile_output
     from .reconciler import Reconciler
 
     paths = FarmPaths(farm_root(Path(args.project)))
@@ -308,12 +331,12 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         now = time.monotonic()
         if not args.loop or acted or now - last_print[0] >= heartbeat_every:
             line = report if (acted or not args.loop) else {"heartbeat": datetime.now(timezone.utc).isoformat()}
-            print(json.dumps(line, sort_keys=True), flush=True)
+            print(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), **line}, sort_keys=True), flush=True)
             last_print[0] = now
 
     # INV-6: at most one reconciler mutates a farm at a time.
     try:
-        with single_reconciler(paths.runtime):
+        with single_reconciler(paths.runtime), reconcile_output(getattr(args, "log", None)):
             from datetime import datetime, timezone
             from .provenance import farm_identity, require_compatible_writer, require_local_executor_host, runtime_identity
             upgrade = getattr(args, "upgrade_from_source", None)
@@ -369,6 +392,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     "loop": args.loop, "writer_policy": args.writer_policy,
                     "grace_seconds": args.grace_seconds, "interval": args.interval,
                     "max_auto_restarts": args.max_auto_restarts,
+                    "reconcile_log": str(Path(args.log).expanduser().resolve()) if getattr(args, "log", None) else None,
                 }
                 atomic_write_json(paths.runtime / "deployment.json", started_deployment)
             if not args.loop:
@@ -396,7 +420,8 @@ def cmd_task_list(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = FarmPaths(farm_root(Path(args.project)))
-    checks = run_doctor(paths)
+    checks = run_doctor(paths, access_registry=args.access_registry,
+                        access_target=args.access_target, access_sockets=args.access_socket)
     for check in checks:
         print(f"{check.level:4s}  {check.message}")
     return 1 if any(check.level == "FAIL" for check in checks) else 0
@@ -421,9 +446,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .access.cli import add_parser as add_access_parser
     add_access_parser(sub)
+    from .connect import add_parser as add_connect_parser
+    add_connect_parser(sub)
 
     p = sub.add_parser("init", help="initialize project-local durable farm state")
     p.set_defaults(func=cmd_init)
+    p = sub.add_parser("storage-probe", help="probe local filesystem operations in a disposable temporary directory")
+    p.add_argument("directory", help="existing directory on the filesystem to probe")
+    p.add_argument("--json", action="store_true", help="emit archivable evidence JSON")
+    p.set_defaults(func=cmd_storage_probe)
     p = sub.add_parser("status", help="summarize authoritative task state")
     p.add_argument("--json", action="store_true",
                    help="structured read-only status: deployment identity, daemon liveness, last tick, task counts")
@@ -496,6 +527,10 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--acceptance-file", required=True, help="complete replacement effective acceptance contract")
         p.set_defaults(func=cmd_decision, action=action)
     p = sub.add_parser("doctor", help="check durable-state invariants")
+    p.add_argument("--access-registry", help="inspect this explicit access registry")
+    p.add_argument("--access-target", help="verify this published interactive target")
+    p.add_argument("--access-socket", action="append", default=[],
+                   help="inspect this explicit tmux socket for conflicting role claims; repeat as needed")
     p.set_defaults(func=cmd_doctor)
     p = sub.add_parser("shadow", help="read-only shadow observation of existing workspaces")
     p.add_argument("workspaces")
@@ -512,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan-only", action="store_true", help="validate and print the command without stopping")
     p.set_defaults(func=cmd_restart)
     p = sub.add_parser("reconcile", help="run the actuating control loop")
+    p.add_argument("--log", help="also record output to this file; rotate daily in UTC, retaining 14 backups")
     p.add_argument("--slurm-job-id", help="launcher-attested allocation ID; pair with --slurm-node (otherwise use Slurm environment)")
     p.add_argument("--slurm-node", help="exact local Slurm NodeName, not a derived hostname; pair with --slurm-job-id")
     p.add_argument("--upgrade-from-source", metavar="SHA256",

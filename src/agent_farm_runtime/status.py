@@ -6,6 +6,7 @@ each reconcile pass; everything else only reads.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,13 +71,15 @@ def _pid_alive(manifest: dict | None) -> bool | None:
     return daemon_alive(manifest)
 
 
-def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) -> dict:
+def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None,
+                refresh_jobs: bool = False) -> dict:
     """Structured read-only status (D38). Flat keys are the contract farmkit reads.
 
     slurm: optional callable job_id -> state used for `observed_jobs`; defaults to the
     runtime's own Slurm observer (read-only squeue/sacct).
     """
     from .adapters.slurm import slurm_job_terminal, slurm_state
+    from .observers import waiting_on_error
     now = now or datetime.now(timezone.utc)
     observe = slurm or slurm_state
     manifest = _read_json(paths.runtime / "deployment.json")
@@ -87,7 +90,7 @@ def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) ->
             when = datetime.fromisoformat(last_tick["ts"])
             tick_age = (now - when).total_seconds()
             last_tick = {**last_tick, "epoch": when.timestamp()}
-        except ValueError:
+        except (TypeError, ValueError, OverflowError):
             tick_age = None
     tasks = TaskStore(paths).list() if paths.tasks.exists() else []
     counts = {state.value: 0 for state in TaskState}
@@ -105,20 +108,31 @@ def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) ->
             "source_root": manifest.get("source_root"), "source_sha256": manifest.get("source_sha256"),
             "executor": manifest.get("executor"), "session": manifest.get("session"),
             "interval": manifest.get("interval"), "loop": manifest.get("loop"),
+            "reconcile_log": manifest.get("reconcile_log"),
         }
-    source_matches = bool(manifest) and all(manifest.get(k) == current[k] for k in ("protocol_version", "source_sha256"))
+    source_matches = (all(manifest.get(k) == current[k] for k in ("protocol_version", "source_sha256"))
+                      if manifest else None)
     handoff = (manifest or {}).get("handoff") or None
     # Prefer what the daemon saw on its last pass (one observer, D28/D29); query the
     # scheduler only for jobs it has not reported, or when the daemon is stale.
-    interval = float((manifest or {}).get("interval") or 30.0)
-    fresh = tick_age is not None and tick_age <= 2 * interval
+    try:
+        interval = float((manifest or {}).get("interval") or 30.0)
+    except (TypeError, ValueError, OverflowError):
+        interval = 0.0
+    fresh = (not refresh_jobs and math.isfinite(interval) and interval > 0
+             and tick_age is not None and 0 <= tick_age <= 2 * interval)
+    if last_tick and last_tick.get("deployment") is not None:
+        fresh = fresh and last_tick["deployment"] == deployment_stamp(manifest or {})
     seen = (last_tick or {}).get("observed_jobs") if fresh and last_tick else None
+    if not isinstance(seen, dict):
+        seen = None
     observed_jobs = []
     for task in tasks:
         wait = task.metadata.get("waiting_on") or ""
-        if task.state is TaskState.WAITING and wait.startswith("job:"):
+        if (task.state is TaskState.WAITING and isinstance(wait, str)
+                and wait.startswith("job:") and waiting_on_error(wait) is None):
             job_id = wait.split(":")[1]
-            if seen is not None and job_id in seen:
+            if seen is not None and job_id in seen and (seen[job_id] is None or isinstance(seen[job_id], str)):
                 state, source = seen[job_id], "daemon"
             else:
                 state, source = observe(job_id), "query"
@@ -142,7 +156,9 @@ def farm_status(paths: FarmPaths, *, now: datetime | None = None, slurm=None) ->
         "pending_deployment_event": bool((manifest or {}).get("pending_event")),
         # tasks
         "task_counts": counts,
-        "tasks": [{"id": t.id, "state": t.state.value, "waiting_on": t.metadata.get("waiting_on"),
+        "tasks": [{"id": t.id, "state": t.state.value,
+                   "waiting_on": t.metadata.get("waiting_on") if t.state is TaskState.WAITING else None,
+                   "last_wait": t.metadata.get("waiting_on") if t.state is not TaskState.WAITING else None,
                    "revision": t.metadata.get("revision", 0),
                    "lease": {"worker_id": t.lease.worker_id, "lease_id": t.lease.lease_id} if t.lease else None}
                   for t in tasks],

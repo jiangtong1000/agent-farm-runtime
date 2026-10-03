@@ -1,0 +1,13 @@
+[defaults]
+snapshot = ["write_result.py", "smoke.sbatch"]
+finite = ["metric"]
+retry = { infra = 0 }
+
+[step.local]
+run = "python write_result.py results/local.json"
+outputs = ["results/local.json"]
+
+[step.slurm]
+after = ["local"]
+run = "smoke.sbatch"
+outputs = ["results/slurm.json"]

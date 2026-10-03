@@ -53,7 +53,8 @@ class TaskCard:
     cached_tokens_last: int | None
     attempts: list[Attempt] = field(default_factory=list)
     in_flight_jobs: list[str] = field(default_factory=list)
-    needs_you: str | None = None          # "ruling:<class>" | "submitted" | None
+    needs_you: str | None = None          # "ruling:<class>" | "submitted" | "job-terminal" | None
+    attention_detail: str | None = None
     ruling_class: str | None = None
     evidence: str | None = None           # FAILURE.md path if any
     review: str | None = None             # REVIEW.md path if present
@@ -201,10 +202,19 @@ def build(reader, *, farm: str, sessions_root: Path | None = None, token_budget_
                                                   lease.get("worker_id"), sessions_root)
         cls = ruling_class(t.get("waiting_on"), t["id"])
         needs = None
+        attention_detail = None
         if t["state"] == "SUBMITTED":
             needs = "submitted"
         elif cls:
             needs = f"ruling:{cls}"
+        elif t["state"] == "WAITING" and (t.get("waiting_on") or "").startswith("job:"):
+            job_id = t["waiting_on"].split(":", 1)[1]
+            state = observed_jobs.get(job_id)
+            if is_terminal(state):
+                needs = "job-terminal"
+                attention_detail = f"job:{job_id} is {state}; awaiting worker resume"
+                if status.get("pid_alive") is not True:
+                    attention_detail += " (daemon unavailable; claim/start the reconciler and confirm resume)"
         enabled, disabled = _actions_for(t["state"], bool(lease))
         ws = Path(workspace) if workspace else None
         card = TaskCard(
@@ -214,6 +224,7 @@ def build(reader, *, farm: str, sessions_root: Path | None = None, token_budget_
             generations=len(((summary.get("dispatches") or {}).get("workers") or [])) or (1 if lease else 0),
             input_tokens_last=tokens_in, cached_tokens_last=tokens_cached,
             attempts=attempts, in_flight_jobs=in_flight, needs_you=needs, ruling_class=cls,
+            attention_detail=attention_detail,
             evidence=_latest_failure_evidence(ledger) if ledger else None,
             review=str(ws / "REVIEW.md") if ws and (ws / "REVIEW.md").exists() else None,
             checkpoint=str(ws / "CHECKPOINT.md") if ws and (ws / "CHECKPOINT.md").exists() else None,

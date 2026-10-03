@@ -191,6 +191,25 @@ has not reported or when the daemon is stale. `events --last N` reads the tail o
 audit log without scanning it; the board uses it.
 See `skills/farm-execution.md` and `examples/five_arm_study/`.
 
+A farm without a deployment manifest reports `source_matches: null`; health and
+the board distinguish this unknown state from an actual source mismatch. Task
+summaries and status expose `waiting_on` only for WAITING tasks. Other states show
+the retained condition as `last_wait`, preserving the durable historical metadata.
+
+Generated startup scripts pass `reconcile --log <farm>/reconciler.log` (override
+with `[farm_defaults].log`). Output remains visible in the terminal and is written
+to a daily UTC rotated log with 14 backups. Tick JSON includes `ts`; deployment
+and status record `reconcile_log`. Logging begins after the singleton lock is
+acquired; wrapper activation refusals appear only in the terminal. Run the script
+from an existing interactive tmux shell to return there after daemon exit. When
+the script is a window's sole command, use tmux `remain-on-exit` or inspect the
+durable log afterward. The script reports its exit status and log path.
+
+Use [the synthetic smoke task](../examples/smoke_test/README.md) to test dispatch,
+verification and receipts without a model. Its Slurm variant also exercises job
+wait/resume. The [host allocation template](../templates/host_job.sbatch) provides
+an explicitly named tmux socket and refuses to reuse an existing session.
+
 ## Human-facing control access
 
 The Master publishes its own control tmux endpoint using `farm --project PROJECT
@@ -324,15 +343,24 @@ yet a handoff target. Do not cancel the old allocation to make room for its succ
    uncertain queued dispatches. Live/UNKNOWN refuses release. Retry after positive
    exit. Successful release seals task revisions/checkpoints and deployment in
    `runtime/handoffs/node-001.json`; subsequent ordinary writes remain disabled.
+   Before release, archive `status --json` with the outstanding `job:` waits and
+   scheduler estimates where available. External jobs continue during the gap.
 4. On the target node: `farm --project /path/to/project handoff claim
    --request-id node-001 --actor master-2`. It validates the exact target, same
    source/protocol, archive hash and unchanged task snapshots under both locks,
    consumes this handoff and transfers host ownership. It does not start workers.
    The old node need not remain accessible after a sealed release.
+   The claim output queries outstanding jobs afresh: `job_waits` includes all of
+   them and `catch_up` lists those already terminal. This is observation only;
+   scheduler completion does not establish a successful scientific result.
 5. Start `reconcile` on the target with the unchanged reviewed executor settings;
    inspect its ticks and first receipts. READY tasks may launch immediately.
    Cleanly parked tasks get fresh context only when their condition/authorization
    permits; owner-held tasks need their normal ruling, not a blanket recovery ruling.
+   Confirm the listed terminal waits resume on the first eligible pass, then check
+   worker verification and reports. For interrupted submissions, run
+   `farmkit reconcile-intents --workspace WORKSPACE` before another tick. The board
+   flags terminal job waits awaiting resume, including while the daemon is down.
 
 Repeated requests with the same ID are idempotent; a new master should inspect
 and continue that request, not invent a second ID. Deployment changes embed a small

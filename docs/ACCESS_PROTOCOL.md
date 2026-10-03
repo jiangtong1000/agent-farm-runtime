@@ -1,12 +1,18 @@
 # Control-session access protocol
 
+**Current recommendation:** adopt the existing interactive Master with a schema-2
+access generation and session-only attachment. Keep the reconciler in a separate
+daemon session/server when useful. Adoption never launches another Master. Schema 1
+remains readable and its immutable epoch records remain evidence; new endpoint
+maintenance uses schema 2 without changing task protocol 4 or the execution epoch.
+
 The access layer maps an explicit, farm-specific target such as `cluster/study-a`
 to a verified, human-facing Master tmux session. A target is permanently bound
 to one farm and canonical root. Nodes, allocations and sessions can change
 across execution epochs without changing that target. Another farm uses another
 target, such as `cluster/study-b`; a site prefix does not mean "whichever farm
 is active here." A movable shorthand such as local `farm delta` belongs to a
-future local client, never to this remote registry.
+local [connection client](CONNECT.md), never to this remote registry.
 The Master operates this layer under the Owner's deployment authority. It uses
 the CLI; it never edits access JSON, deployment JSON or tmux identity markers.
 
@@ -34,7 +40,8 @@ flowchart TD
 
 The deployment manifest remains the execution authority. The registry publishes
 an endpoint for that deployment, not another scheduler or ownership database.
-Readers follow **only** `current.json`. They never enumerate epochs, job names,
+Readers follow **only** `current.json` (or `current.daemon.json` for an explicit
+daemon request). They never enumerate epochs, job names,
 farms or sessions to find a replacement. Publication time is not a ranking rule.
 
 Publication requires all of the following:
@@ -66,7 +73,8 @@ Publication requires all of the following:
 
 The markers are `FARM_ID`, `FARM_EXECUTION_EPOCH`, `FARM_SLURM_JOB_ID`, `FARM_ROOT`,
 `FARM_ACCESS_TARGET`, `FARM_SOURCE_SHA256`, `FARM_PROTOCOL_VERSION`,
-`FARM_RUNTIME_HOST`, `FARM_SLURM_NODE` and `FARM_SLURM_START_TIME`.
+`FARM_RUNTIME_HOST`, `FARM_SLURM_NODE` and `FARM_SLURM_START_TIME`. Adopted schema-2
+endpoints also require `FARM_ENDPOINT_ROLE` (`interactive` or `daemon`).
 They are **session** environment values, not inferred pane environment or global
 tmux state. Unrelated environment values are not returned or persisted.
 
@@ -92,7 +100,7 @@ farm --project /shared/farms/F1 access publish \
   --registry /shared/farm-access --target cluster/study-a \
   --job-id "$SLURM_JOB_ID" --control-session master \
   --control-socket /run/user/1001/farm-master.sock \
-  --default-window main --expected-epoch node-002 --json
+  --expected-epoch node-002 --json
 
 farm access resolve \
   --registry /shared/farm-access --target cluster/study-a --json
@@ -109,6 +117,16 @@ rejects known volatile registry/farm paths (`/tmp`, `/var/tmp`, `/dev/shm`, `/ru
 and their macOS equivalents), including symlinks into them; a path outside those
 locations alone does not prove persistence. A **control socket** may be on a
 node-local volatile filesystem: its durable identity lives in the registry.
+
+Registry directories must belong to the invoking UID and have no group/other
+write bits; mode `0700` is recommended (`0600` for records). A normal HPC project
+directory such as `2770` is unsuitable as the registry itself. Create a dedicated
+private subdirectory, inspect `getfacl`, and remove inherited access/default ACLs
+there if necessary (`setfacl -b -k PRIVATE_REGISTRY`, then `chmod 700
+PRIVATE_REGISTRY`). Never apply these changes to the shared project root. Setgid
+alone is not rejected; group/other write authority is the restriction. Errors
+report observed mode/UID and the required owner/write policy. The registry does
+not automatically change permissions or ACLs.
 
 Targets are `NAME` or `SITE/FARM`. Each component, control session name and window
 name uses `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. Numeric window arguments select an exact
@@ -156,14 +174,18 @@ Claim and offline recovery clear `scheduler_attestation`. The new reconciler
 must capture its own allocation and write a completed tick carrying the same
 attestation. No allocation data is inherited from the previous epoch.
 
-All four commands output JSON; `--json` is accepted for explicit client intent.
+All access commands output JSON; `--json` is accepted for explicit client intent.
 Exit code 0 means `INITIALIZED`, `RESOLVED` or `VERIFIED`; protocol failures
 return 1. Invalid CLI syntax and wrapper policy failures retain the existing CLI
-exit behavior. Clients must require valid schema 1 JSON, `state == "VERIFIED"`
+exit behavior. Clients must require a supported schema (1 or 2), `state == "VERIFIED"`
 **and** `verified == true` before using attachment data; exit code 0 alone is
 insufficient.
 
 ## Durable schema 1
+
+This legacy format is retained without rewriting its records. Its epoch-bound
+publication command retains the original conflict behavior. Adopt/rotate it using
+schema 2 below; do not delete its files to reset the target.
 
 For target `cluster/study-a`:
 
@@ -307,9 +329,9 @@ The response state vocabulary is:
 Failure responses contain no record to attach to and no attachment arguments.
 A purged Slurm job producing an error is `UNREACHABLE`, not inferred dead from
 absence. SSH authentication and network failures before the CLI runs must be
-reported by the later client, never translated into replacement permission.
+reported by the [connection client](CONNECT.md), never translated into replacement permission.
 
-## Publication transaction and crash behavior
+## Legacy schema-1 publication transaction and crash behavior
 
 Publication first checks the configured registry and deployment. It then takes
 the target's `publish.lock`, followed by the farm's existing task mutation lock.
@@ -364,7 +386,9 @@ protocol's publication and verification checks.
    storage using [deployment setup](../README.md#configure-and-start-a-deployment).
    Establish that the storage is persistent/shared and supports flock,
    file/directory fsync and atomic rename, using site evidence and checks appropriate
-   to the current stage. Confirm paths and UID on the current host; cross-node
+   to the current stage. `farm storage-probe DIRECTORY --json` exercises local
+   durability primitives in an isolated scratch directory; it does not establish
+   shared visibility or cross-node lock exclusion. Confirm paths and UID on the current host; cross-node
    visibility and lock exclusion are checked at planned turnover. Provision the
    registry parent, then run
    `farm access init --registry /shared/farm-access --attest-shared-storage`.
@@ -376,8 +400,11 @@ protocol's publication and verification checks.
    Wait for a completed, fresh tick in `farm --project PROJECT status
    --json`. For an existing deployment, first use the reviewed stopped-writer
    upgrade procedure; do not patch identity fields into an old manifest.
-3. Through the normal Master launch procedure, create the human-facing tmux
-   session on an explicitly chosen socket and start/resume the Master there.
+3. If an interactive Master is already running, select that exact existing socket,
+   session and Master process PID, then use `access adopt` below. Never launch a
+   second Master during setup. Otherwise, through the normal Master launch
+   procedure, create the human-facing tmux session on an explicitly chosen socket
+   and start/resume the Master there.
    For example, `tmux -S /run/user/1001/farm-master.sock new-session -s master -n
    main` creates that control session; substitute the site's owned socket path.
    This action is external to access publication. Do not assume the executor's
@@ -416,17 +443,122 @@ protocol's publication and verification checks.
    [offline recovery](OPERATIONS.md#offline-hostprotocol-recovery) procedure with
    positive shutdown evidence; publish only after the recovered epoch is ready.
 
-Master conversation rotation can reuse an existing bound tmux session/window.
-Destroying/recreating the server, socket, bound session or selected window makes
-its immutable epoch record stale. There is deliberately no `--force`, `unpublish`
-or same-epoch overwrite. Restoring markers via verify is also forbidden. A new
-endpoint requires an independently authorized execution-epoch transition through
-the existing turnover/recovery procedures; those procedures must satisfy their
-own preconditions. Do not invent a handoff or delete records to bypass this rule.
+Master conversation rotation can reuse an existing bound tmux session. Prefer
+session-only binding: an incidental window can close without invalidating access
+while another window keeps the session alive. Explicit `--default-window` binds
+the exact native window ID; destroying it makes that record stale. Destroying the
+session/server/socket also makes the record stale. Use the schema-2 generation
+transition below to adopt the replacement in the same execution epoch. There is
+no `--force`, historical rewrite, automatic fallback or marker repair by verify.
+Unrelated workers and allocations do not need to restart for endpoint maintenance.
+
+## Schema 2: adoption, endpoint roles and atomic rotation
+
+Select the existing Master's exact socket, session and process PID. The Owner's
+selection attests that process's role; the runtime proves its UID, live Linux
+process start identity, process namespace and ancestry to exactly one live pane
+in that session. It rejects idle shell PIDs and the reconciler PID for an
+interactive role. It does not infer the role from executable names (`node` may
+be a Master), window names or another server. Neither adoption nor publication
+creates a tmux session, sends keys, starts or stops a process.
+
+```bash
+farm --project /shared/farms/F1 access adopt \
+  --registry /shared/farm-access --target cluster/study-a \
+  --job-id 12345 --control-socket /run/user/1001/interactive.sock \
+  --control-session master --role-pid 4567 \
+  --generation master-001 --expected-current none --json
+
+farm access resolve --registry /shared/farm-access \
+  --target cluster/study-a --role interactive --json
+```
+
+`adopt` defaults to `--role interactive`. All generation publications require an
+explicit `--generation ID` and `--expected-current DIGEST`; `none` is allowed only
+when that role has no current pointer. To adopt a schema-1 endpoint, supply its
+current digest instead. `--default-window` remains optional and is best omitted.
+A new Master process (including one resumed in the same pane) requires a new
+generation, because the old exact process identity no longer verifies.
+
+A target's default operator role is interactive. Its normal `current.json` never
+selects a daemon endpoint. An independently adopted `--role daemon --role-pid PID`
+uses `current.daemon.json`; resolve/verify must request `--role daemon` explicitly.
+The two roles require separate sessions, may use separate sockets, and share one permanent farm
+binding. A daemon-only target is unpublished for default interactive attachment.
+`resolve --role interactive` rejects legacy/untyped endpoints until adopted.
+The first-party [connection client](CONNECT.md) requires an adopted role.
+
+The registry descriptor and `binding.json` remain schema 1. A schema-2 immutable
+record is stored at `generations/ID.json`, retaining every schema-1 record field
+and adding exactly these fields (with schema version changed to 2):
+
+```json
+{
+  "schema_version": 2,
+  "generation": "master-001",
+  "previous_record_sha256": null,
+  "endpoint_role": {
+    "kind": "interactive",
+    "pid": 4567,
+    "pid_starttime": 987654,
+    "pid_namespace": "pid:[4026531836]",
+    "pane_id": "%1"
+  }
+}
+```
+
+`previous_record_sha256` is the expected predecessor digest, or null for the
+first publication. `endpoint_role` may be null for an explicit `access publish`
+generation used to repair a legacy endpoint; such an endpoint cannot satisfy an
+explicit interactive/daemon role or the connection client. Once adopted, a target
+cannot be downgraded to an untyped endpoint. Generation identifiers follow the
+existing epoch identifier syntax and are independent of execution epochs. A
+generation ID is immutable across both roles, so use distinct descriptive IDs.
+
+The schema-2 pointer retains `target`, `execution_epoch`, `record_sha256`, sets
+`schema_version` to 2 and adds `generation`. Readers validate that exact record,
+digest and permanent farm binding; they never scan generations. A new schema-2
+response reports schema 2. The default role is selected by the pointer filename
+and verified against `endpoint_role.kind`, never inferred from session names.
+
+Under the existing publication/farm locks, publication compares the role's current
+digest before changing session markers and again immediately before replacing
+its pointer. It writes the immutable generation first, re-verifies all live
+evidence, then atomically advances the pointer. Competing/stale publishers fail
+closed. An identical retry of the current generation succeeds without rewriting
+history; a retry of an older generation cannot roll the pointer back. Crashes can
+leave an orphan generation, which readers never select. A retry may finish that
+same orphan only while its expected predecessor remains current.
+
+For a vanished optional window, inspect the original session and selected Master,
+then run `access adopt` with a new generation, the current digest and no window.
+This preserves the target, farm identity, root and execution epoch. If the old
+endpoint is stale, its pointer digest remains inspectable as audit evidence in
+the registry; use that exact digest, not a guessed replacement. No generation
+can change the target's farm identity/root. Planned node turnover still follows
+drain/release/claim; generations never bypass execution ownership or readiness.
+
+## Read-only access diagnosis
+
+```bash
+farm --project /shared/farms/F1 doctor \
+  --access-registry /shared/farm-access --access-target cluster/study-a \
+  --access-socket /run/user/1001/interactive.sock \
+  --access-socket /run/user/1001/daemon.sock --json
+```
+
+Doctor inspects the published endpoint and explicitly supplied socket inventory.
+It reports stale session/window/process identities, missing role declarations,
+shell-only Master candidates and multiple farm-marked Master candidates. Socket,
+session and role metadata are shown; arbitrary environment values and process
+arguments are not. Inventory is diagnostic evidence and cannot choose authority.
+Servers outside the supplied inventory are not claimed to be absent. Diagnosis
+never mutates, kills, detaches, republishes or starts sessions; it recommends
+explicit adoption/rotation after inspecting the candidates.
 
 ## Compatibility and client boundary
 
-This is **access schema 1**, an additive deployment contract; runtime protocol
+Access schemas **1 and 2** are additive deployment contracts; runtime protocol
 stays **4**. No task, receipt, lease, executor state or turnover control format is
 changed. Startup adds `farm_id`, `farm_root`, an explicit `execution_epoch` and
 `scheduler_attestation`; heartbeat adds a `deployment` identity stamp including
@@ -435,15 +567,17 @@ ignore them. An old manifest or tick cannot be used for access publication until
 a reviewed upgraded reconciler has started and completed a pass. Old binaries
 cannot provide this access CLI or readiness contract. They are not supported
 participants in an access-enabled deployment.
-This revision corrects the still-unmerged schema 1 directly. Earlier experimental
+Earlier experimental schema-1
 records lacking `scheduler_node` are rejected, and incomplete marker sets cannot
 verify. There is no migration, automatic JSON rewrite or compatibility fallback.
 
 Use one fixed reviewed release for the daemon, publisher and verifier. A source
-upgrade after publication makes the record stale. Since records bind both build
-and epoch, republishing a different source in the same epoch is a conflict;
-plan a supported epoch transition as well as the reviewed build upgrade before
-re-enabling access. `farm restart --to` alone does not create an access generation.
+upgrade after publication makes the record stale. After the reviewed stopped-writer
+upgrade and fresh reconciler tick, publish a new access generation using the old
+digest. The replacement must pass all source, allocation, role and readiness
+checks. `farm restart --to` alone does not create an access generation.
+Conflicting existing session markers are never overwritten; a build/epoch change
+normally needs an explicitly prepared replacement session carrying the new identity.
 Do not change build during a planned handoff.
 
 Linux process identity, POSIX durable storage, Slurm `scontrol` and tmux are
@@ -470,15 +604,25 @@ Both `can't find session: NAME` and `can't find session NAME` are positive missi
 endpoint observations. Permission errors remain AUTH_REQUIRED; server races,
 connection failures and unexpected command failures remain UNREACHABLE. No error triggers
 a session scan, alternate socket, retry with a weaker target, or server creation.
+Modern tmux may instead return an empty native session ID/name for an absent exact
+target; that is also SESSION_MISSING. Schema-2 attachment additionally checks the
+server PID, native session ID and farm/epoch/source/target/role markers inside
+tmux immediately before attaching. A mismatch prints a stale-endpoint message and
+does not attach. These checks still do not turn verification into a distributed
+fence: process exit and publication can race after the final verification.
+The tmux false branch prints its diagnostic with `display-message`, which can
+return exit status zero despite withholding attachment. Clients must not equate
+successful command exit with an attached terminal; the displayed stale-endpoint
+message requires a new explicit connection attempt.
 
-A later `farm-connect` client can map a local word such as `delta` to a configured
+A [portable connection client](CONNECT.md) uses a configured
 resolver transport, registry and one farm-specific target. Only that client's
 local configuration may move the shorthand to a different farm. It runs resolve where the shared
 farm paths are mounted, carries `expected_record` to verify on the exact host,
 then handles authentication and the returned attachment argv. No local Mac mount
 is required if resolution runs remotely. SSH aliases, credentials, ControlMaster,
 Ghostty, routing and tmux UI preferences belong to that client/site configuration.
-This repository provides neither that client nor unattended reconnection.
+The client performs no unattended reconnection or session discovery.
 
 <a id="deployment-and-canary-gate"></a>
 
@@ -490,7 +634,7 @@ Unix socket fixtures. They test concurrent publication, crash boundaries,
 immutable retry, drain serialization, stale/unknown observations and read-only
 behavior. They do not establish a site's filesystem or hostname behavior.
 
-Local validation on Linux, Python 3.11.4: the focused access/portability suite
+Historical schema-1 validation on Linux, Python 3.11.4: the focused access/portability suite
 passed **165 tests in 42.13 seconds**. The full suite, including the private access
 canaries, passed **566 tests, 3 skipped in 252.87 seconds**. The skips require a
 private release wrapper, an offline recovery fixture, or the older opt-in runtime
@@ -513,8 +657,15 @@ env -u FARM_RUN_TMUX_CANARY -u FARM_TEST_REFERENCE_WRAPPER \
 For the focused mock suite, use the same command without
 `FARM_RUN_ACCESS_TMUX_CANARY=1` and append `tests/test_access.py
 tests/test_access_allocation.py tests/test_access_observations.py
-tests/test_portability.py`. To run just the disposable tmux checks, retain the
-flag and append `tests/test_access_tmux_canary.py`.
+tests/test_access_generations.py tests/test_access_roles.py
+tests/test_access_diagnostics.py tests/test_portability.py`. To run just the
+disposable tmux checks, retain the flag and append `tests/test_access_tmux_canary.py
+tests/test_access_lifecycle_canary.py`. The lifecycle test drives the public CLI
+through adoption, default/daemon resolution, attach/detach/reconnect, window
+closure, immutable generation rotation and stale CAS/digest rejection. It uses
+synthetic scheduler replies and disposable Master stand-ins, with actual tmux
+servers and Linux process identity. CI exercises both tmux 2.7 and modern tmux;
+these tests do not establish real site allocation/SSH behavior.
 
 ### Staged validation on the actual farm
 
@@ -565,4 +716,4 @@ edit identity records, weaken checks or fall back to an older endpoint. This acc
 failure does not itself authorize stopping unrelated workers or scientific jobs.
 Runtime rollback, if needed, follows the existing stopped-writer procedure and
 does not rewrite access history. Access owns no background service, and this
-validation procedure does not add a Mac client.
+validation procedure does not itself configure or deploy the connection client.

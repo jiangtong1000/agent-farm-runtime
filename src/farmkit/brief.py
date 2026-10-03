@@ -10,7 +10,16 @@ HEADINGS = {
     "method": ("做法", "method"),
 }
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
-PATH = re.compile(r"(?<![\w/])(/[\w./+-]+|[\w.-]+/[\w./+-]+|[\w-]+\.(?:toml|md|json|py|sbatch))")
+PATH = re.compile(r"(?<![\w/])(/[\w./+-]+|[\w.-]+/[\w./+-]*|[\w.-]+\.(?:toml|md|json|py|sbatch))")
+OPTIONAL_AFTER = re.compile(r"^[`\s\]\)\"']*(?:\(\s*)?(?:if (?:it exists|present|exists)|when present)\b", re.I)
+RUNTIME_FILES = {"CHECKPOINT.md", ".farm_receipt.py"}
+RUNTIME_DIRS = {".farm", "attempts"}
+
+
+def _runtime_path(ref: str) -> bool:
+    """Generated workspace files and runtime directories are not required inputs."""
+    parts = Path(ref).parts
+    return bool(parts and (parts[0] in RUNTIME_DIRS or len(parts) == 1 and parts[0] in RUNTIME_FILES))
 
 
 def lint(path: Path) -> list[str]:
@@ -28,11 +37,15 @@ def lint(path: Path) -> list[str]:
         problems.append("contains a 64-hex digest; name the file or version instead")
     if "farmkit tick" not in lower:
         problems.append("does not tell the worker to run `farmkit tick` on each wake")
-    for m in PATH.finditer(text):
-        ref = m.group(1)
-        if ref.startswith("http") or ref.count("/") == 0 and not ref.endswith((".toml", ".md", ".json", ".py", ".sbatch")):
-            continue
-        candidate = Path(ref) if ref.startswith("/") else path.parent / ref
-        if not candidate.exists() and not any(ch in ref for ch in "*<>{}"):
-            problems.append(f"referenced path does not exist: {ref}")
+    for line in text.splitlines():
+        # URLs describe remote resources, not local prerequisites.
+        line = re.sub(r"https?://\S+", "", line)
+        for m in PATH.finditer(line):
+            # A sentence-ending period is not part of a file or directory name.
+            ref = m.group(1).rstrip(".")
+            if _runtime_path(ref) or OPTIONAL_AFTER.match(line[m.end():]):
+                continue
+            candidate = Path(ref) if ref.startswith("/") else path.parent / ref
+            if not candidate.exists() and not any(ch in ref for ch in "*<>{}"):
+                problems.append(f"referenced path does not exist: {ref}")
     return problems

@@ -5,11 +5,12 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from ..provenance import farm_identity
 
 SCHEMA_VERSION = 1
+GENERATION_SCHEMA_VERSION = 2
 NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 EPOCH = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 SHA256 = r"[0-9a-f]{64}"
@@ -17,7 +18,7 @@ NODE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}"
 SCHEDULER_FIELDS = {"kind", "job_id", "scheduler_node", "allocation_started_at"}
 MARKERS = ("FARM_ID", "FARM_EXECUTION_EPOCH", "FARM_SLURM_JOB_ID", "FARM_ROOT",
            "FARM_ACCESS_TARGET", "FARM_SOURCE_SHA256", "FARM_PROTOCOL_VERSION",
-           "FARM_RUNTIME_HOST", "FARM_SLURM_NODE", "FARM_SLURM_START_TIME")
+           "FARM_RUNTIME_HOST", "FARM_SLURM_NODE", "FARM_SLURM_START_TIME", "FARM_ENDPOINT_ROLE")
 
 
 class AccessError(RuntimeError):
@@ -73,12 +74,15 @@ def result(state: str, target: str | None, reason: str, detail: str, **extra) ->
 
 
 def markers(record: dict) -> dict[str, str]:
-    return {"FARM_ID": record["farm_id"], "FARM_EXECUTION_EPOCH": record["execution_epoch"],
+    value = {"FARM_ID": record["farm_id"], "FARM_EXECUTION_EPOCH": record["execution_epoch"],
             "FARM_SLURM_JOB_ID": record["scheduler"]["job_id"], "FARM_ROOT": record["farm_root"],
             "FARM_ACCESS_TARGET": record["target"], "FARM_SOURCE_SHA256": record["source_sha256"],
             "FARM_PROTOCOL_VERSION": str(record["protocol_version"]), "FARM_RUNTIME_HOST": record["runtime_host"],
             "FARM_SLURM_NODE": record["scheduler"]["scheduler_node"],
             "FARM_SLURM_START_TIME": record["scheduler"]["allocation_started_at"]}
+    if record.get("endpoint_role") is not None:
+        value["FARM_ENDPOINT_ROLE"] = record["endpoint_role"]["kind"]
+    return value
 
 
 def validate_scheduler(scheduler: dict) -> dict:
@@ -99,14 +103,23 @@ def validate_scheduler(scheduler: dict) -> dict:
 def validate_record(record: dict, target: str, epoch: str) -> dict:
     fields = {"schema_version", "target", "farm_id", "farm_root", "execution_epoch", "runtime_host",
               "protocol_version", "source_sha256", "scheduler", "control", "owner_uid", "published_at"}
+    version = record.get("schema_version")
+    if version == GENERATION_SCHEMA_VERSION:
+        fields |= {"generation", "previous_record_sha256", "endpoint_role"}
     require(set(record) == fields and type(record.get("schema_version")) is int
-            and record["schema_version"] == SCHEMA_VERSION,
+            and version in {SCHEMA_VERSION, GENERATION_SCHEMA_VERSION},
             "CONFLICT", "record_schema", "Unsupported or invalid access record")
+    if version == GENERATION_SCHEMA_VERSION:
+        from .roles import validate_role
+        validate_role(record["endpoint_role"])
+        identifier(record["generation"], EPOCH)
+        if record["previous_record_sha256"] is not None:
+            identifier(record["previous_record_sha256"], SHA256)
     require(record["target"] == target and record["execution_epoch"] == epoch,
             "CONFLICT", "record_identity", "Record does not match its target/epoch")
     identifier(epoch, EPOCH)
     root = record["farm_root"]
-    require(isinstance(root, str) and Path(root).is_absolute() and Path(root).name == ".farm",
+    require(isinstance(root, str) and PurePosixPath(root).is_absolute() and PurePosixPath(root).name == ".farm",
             "CONFLICT", "farm_root", "Record must name an absolute .farm root")
     require(record["farm_id"] == farm_id(root), "CONFLICT", "farm_id", "Farm ID does not match root")
     require(isinstance(record["runtime_host"], str) and bool(record["runtime_host"]),
@@ -120,7 +133,7 @@ def validate_record(record: dict, target: str, epoch: str) -> dict:
     require(isinstance(control, dict) and set(control) == {
         "socket", "socket_device", "socket_inode", "session", "session_id", "default_window", "window_id",
         "server_pid", "server_starttime", "boot_id"}, "CONFLICT", "control", "Invalid control endpoint")
-    require(isinstance(control["socket"], str) and Path(control["socket"]).is_absolute(),
+    require(isinstance(control["socket"], str) and PurePosixPath(control["socket"]).is_absolute(),
             "CONFLICT", "socket_path", "Control socket must be an absolute path")
     identifier(control["session"])
     identifier(control["session_id"], r"\$[0-9]+")

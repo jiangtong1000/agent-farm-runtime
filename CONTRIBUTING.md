@@ -20,3 +20,9 @@ Implementation rule:
 5. Keep mechanical orchestration free of scientific judgment.
 6. Add a regression test for every historical or newly observed orchestration failure.
 7. Prefer shadow evidence before adding production mechanisms.
+
+Keep changes small by tracing the actual failure first, reusing existing helpers,
+then preferring the standard library or native platform facilities before custom
+machinery. Remove unused configuration and duplicate implementations where the
+behavior is covered. This follows [Ponytail's design ladder](https://github.com/dietrichgebert/ponytail#how-it-works):
+simplicity must preserve validation, error handling and data-loss protections.

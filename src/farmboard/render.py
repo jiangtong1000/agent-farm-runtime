@@ -29,7 +29,9 @@ def header_lines(board: Board, now: datetime) -> list[str]:
     daemon = {True: f"ALIVE pid {s.get('pid')}", False: f"DEAD (pid {s.get('pid')} gone)", None: "UNKNOWN (no manifest or other host)"}[alive]
     tick = s.get("last_tick") or {}
     tick_age = f"{_age(tick.get('ts'), now)} ago" if tick else "never"
-    source = "source ok" if s.get("source_matches") else "SOURCE MISMATCH: daemon code differs from CLI"
+    matches = s.get("source_matches")
+    source = (("no daemon manifest yet" if not s.get("deployment") else "source comparison unavailable")
+              if matches is None else ("source ok" if matches else "SOURCE MISMATCH: daemon code differs from CLI"))
     handoff = s.get("handoff") or {}
     extra = f" · {handoff.get('kind') or 'handoff'} {handoff.get('phase')}" if handoff else ""
     pending = [k for k in ("pending_task_commit", "pending_recovery", "pending_deployment_event") if s.get(k)]
@@ -55,7 +57,7 @@ def render_text(board: Board, now: datetime | None = None, width: int = 160) -> 
     if not board.needs_you:
         out.append("  (nothing)")
     for c in board.needs_you:
-        what = "SUBMITTED, awaiting acceptance" if c.needs_you == "submitted" else f"parked: {c.waiting_on}"
+        what = c.attention_detail or ("SUBMITTED, awaiting acceptance" if c.needs_you == "submitted" else f"parked: {c.waiting_on}")
         ev = f"  evidence {c.evidence}" if c.evidence else ""
         rv = f"  review {c.review}" if c.review else ""
         out.append(f"  {c.id:<28} {what}  rev {c.revision}  [{' '.join(c.actions)}]{ev}{rv}")
@@ -113,7 +115,7 @@ def render_html(board: Board, now: datetime | None = None) -> str:
     if not board.needs_you:
         parts.append("<p class='muted'>nothing</p>")
     for c in board.needs_you:
-        what = "SUBMITTED, awaiting acceptance" if c.needs_you == "submitted" else f"parked: <span class='mono'>{h(c.waiting_on or '')}</span>"
+        what = h(c.attention_detail) if c.attention_detail else ("SUBMITTED, awaiting acceptance" if c.needs_you == "submitted" else f"parked: <span class='mono'>{h(c.waiting_on or '')}</span>")
         links = "".join(f" · <a href='file://{h(p)}'>{h(n)}</a>" for n, p in (("FAILURE.md", c.evidence), ("REVIEW.md", c.review), ("CHECKPOINT.md", c.checkpoint)) if p)
         parts.append(f"<div class='card'><b>{h(c.id)}</b> <span class='muted'>rev {c.revision}</span> — {what}{links}"
                      f"<br><span class='muted'>actions: {h(' '.join(c.actions))}</span></div>")

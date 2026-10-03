@@ -24,17 +24,25 @@ runtime_interpreter = "/path/to/python"
 farmkit_interpreter = "/path/to/python"
 
 [executor.codex]
-cmd = "codex exec --skip-git-repo-check --sandbox danger-full-access -m <model> -c model_reasoning_effort=medium"
+model = "<model>"
+effort = "medium"
+# Dedicated worker configuration/state on a local filesystem; provision and login
+# separately from the owner's interactive Codex. See docs/PORTABILITY.md.
+home = "/local/path/to/farm-codex-home"
 path_prelude = "export PATH=/path/to/node/bin:$PATH"
+# Optional cmd replaces the shipped command; normally model/effort suffice.
 
 [executor.claude]
-cmd = "claude -p --dangerously-skip-permissions --output-format json"
+# model = "<model>"
+# effort = "medium"                  # requires a CLI/model supporting --effort
+# home = "/local/path/to/farm-claude-home"  # exported as CLAUDE_CONFIG_DIR
 
-[worker]
-default_model = "<model>"
-default_effort = "medium"
-rotate_after_wakes = 12
-rotate_when_input_tokens_over = 120000
+[farm_defaults]
+executor = "codex-tmux"
+interval = 30
+grace_seconds = 120
+max_auto_restarts = 3
+# log = "/path/to/reconciler.log"     # default: <farm>/reconciler.log
 
 [paths]
 farms_root = "/shared/lab/farms"

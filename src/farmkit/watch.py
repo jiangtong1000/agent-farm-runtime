@@ -83,7 +83,7 @@ def ruling_parks(status: dict) -> list[dict]:
     """
     hits: list[dict] = []
     for task in status.get("tasks", []):
-        if task.get("state") not in {"WAITING", "RUNNING", "BLOCKED"}:
+        if task.get("state") != "WAITING":
             continue
         waiting_on = task.get("waiting_on") or ""
         parsed = parse_ruling(waiting_on, task.get("id"))

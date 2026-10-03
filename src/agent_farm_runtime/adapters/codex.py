@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from ..models import Lease, Receipt, Task
 from ..procutil import host_identity, observe_pidfile
@@ -119,6 +120,9 @@ class CodexClusterConfig:
     # shell line(s) to prepare PATH inside the tmux window (e.g. an nvm export);
     # empty means "codex is already on the login shell PATH".
     path_prelude: str = ""
+    # Worker-local application state; exported after FARM_* and before the prelude.
+    home: str = ""
+    home_env: ClassVar[str] = "CODEX_HOME"
     session_id_capture_delay: int = 45
     # Limit for this backend's argv transport, not a core Task Store constraint.
     max_prompt_bytes: int = 98304
@@ -131,9 +135,15 @@ class CodexClusterConfig:
     @classmethod
     def from_env(cls) -> "CodexClusterConfig":
         d = cls()
+        cmd = os.environ.get("FARM_CODEX_CMD", d.codex_cmd)
+        if model := os.environ.get("FARM_CODEX_MODEL"):
+            cmd += " -m " + shlex.quote(model)
+        if effort := os.environ.get("FARM_CODEX_EFFORT"):
+            cmd += " -c " + shlex.quote("model_reasoning_effort=" + json.dumps(effort))
         return cls(
-            codex_cmd=os.environ.get("FARM_CODEX_CMD", d.codex_cmd),
+            codex_cmd=cmd,
             path_prelude=os.environ.get("FARM_CODEX_PATH_PRELUDE", d.path_prelude),
+            home=os.environ.get("FARM_CODEX_HOME", d.home),
             session_id_capture_delay=int(
                 os.environ.get("FARM_CODEX_SID_DELAY", d.session_id_capture_delay)
             ),
@@ -158,7 +168,8 @@ def _env_exports(worker_id: str, task_id: str, lease_id: str, receipt_path: str)
 
 
 def _prelude(cfg: CodexClusterConfig) -> str:
-    return (cfg.path_prelude + "\n") if cfg.path_prelude else ""
+    home = f"export {cfg.home_env}={shlex.quote(cfg.home)}\n" if cfg.home else ""
+    return home + ((cfg.path_prelude + "\n") if cfg.path_prelude else "")
 
 
 def validate_prompt(cfg: CodexClusterConfig, text: str) -> None:
@@ -239,8 +250,8 @@ def render_launch_script(
     guard = f"mkdir {shlex.quote(pid_file + '.dispatch-' + attempt_id)} || exit 4\n" if attempt_id else ""
     return f"""#!/bin/bash
 {guard}cd {shlex.quote(workspace)} || exit 3
-{_prelude(cfg)}{_env_exports(worker_id, task_id, lease_id, receipt_path)}
-rm -f {shlex.quote(receipt_path)}
+{_env_exports(worker_id, task_id, lease_id, receipt_path)}
+{_prelude(cfg)}rm -f {shlex.quote(receipt_path)}
 {body}"""
 
 
@@ -267,8 +278,8 @@ def render_resume_script(
     guard = f"mkdir {shlex.quote(pid_file + '.dispatch-' + attempt_id)} || exit 4\n" if attempt_id else ""
     return f"""#!/bin/bash
 {guard}cd {shlex.quote(workspace)} || exit 3
-{_prelude(cfg)}{_env_exports(worker_id, task_id, lease_id, receipt_path)}
-rm -f {shlex.quote(receipt_path)}
+{_env_exports(worker_id, task_id, lease_id, receipt_path)}
+{_prelude(cfg)}rm -f {shlex.quote(receipt_path)}
 SID=$(cat {shlex.quote(sid_path)} 2>/dev/null)
 if [ -z "$SID" ]; then echo "no session id at {sid_path}; cannot resume" >&2; exit 3; fi
 {body}"""
