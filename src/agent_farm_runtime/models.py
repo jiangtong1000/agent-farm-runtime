@@ -92,9 +92,8 @@ class Event:
 class ReceiptStatus(StrEnum):
     """What a worker reports about the unit of work it was leased to do.
 
-    This is the structured receipt primitive (V2_DESIGN deferred item, minimal
-    form). A worker never reports DONE: DONE requires recorded acceptance, which
-    is a master/harness judgment, not a worker claim (Layer-1/Layer-2 boundary).
+    A worker never reports DONE: DONE requires recorded acceptance by an
+    authorized decision-maker, not a worker claim.
     """
 
     RUNNING = "RUNNING"      # heartbeat; still executing -> task stays RUNNING

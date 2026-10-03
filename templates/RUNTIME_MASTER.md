@@ -42,7 +42,6 @@ where you stopped. A missing checkpoint does not prove that a farm is new.
   it does not require a scientific objective. Verify that background `farmkit watch`
   completion notifies this Master and permits it to continue; tmux alone does not
   provide model wakeups. Report what is ready and discuss research with the Owner.
-- Control access is optional. If requested, read docs/ACCESS_PROTOCOL.md and use
 - Adopt the Owner's explicitly selected existing interactive Master session. Record
   its exact socket and session; validate them before publication. A separate daemon
   server may run the reconciler, but setup must not launch a second Master or publish

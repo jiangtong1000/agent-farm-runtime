@@ -11,7 +11,7 @@
 #SBATCH --signal=B:TERM@60
 # Submit with --export=ALL,FARM_SHARED=/shared/farm/hosts,FARM_SESSION=farm2.
 # Submit successors with --exclude=<current-node> and --begin=<overlap-time>
-# several hours before expiry; then follow the drain/release/claim runbook.
+# several hours before expiry; then follow the release/claim runbook.
 set -euo pipefail
 umask 077
 : "${SLURM_JOB_ID:?submit this template with sbatch}"

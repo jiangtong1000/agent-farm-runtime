@@ -38,6 +38,12 @@ full effective contract and evidence before accepting or changing a task. The su
 is a view of Task Store, not another database. Keep historical logs on disk and fetch
 only relevant portions; do not repeatedly feed every task and ledger into a model.
 
+For legacy workspaces without task records, `farm shadow /path/to/workspaces`
+prints advisory observations for each child directory using explicit `.awaiting`
+references, scheduler queries and a best-effort Codex process scan. It never
+dispatches work or writes task state. Missing process observations and UNKNOWN
+results cannot authorize acceptance, reassignment or process control.
+
 ## Task and decision contracts
 
 ```bash
@@ -376,10 +382,9 @@ claim success. Use offline recovery only with positive external shutdown/fencing
 evidence. Inaccessibility by itself is not death. No new task lifecycle states,
 scientific PASS/FAIL rules, scheduling service or automatic migration policy are added.
 
-Release scope is frozen at protocol 4: fix one source revision before deployment
-and do not keep changing it during cutover or turnover. After it passes validation, non-blocking
-suggestions go to later maintenance rather than reopening this release. Reopen
-only for concrete safety, durability, correctness or deployment-blocking defects.
+Pin and validate one source revision before deployment. Keep it fixed throughout
+cutover or turnover; prepare later changes as a separate release. If a defect
+requires changing that revision, repeat the affected validation before proceeding.
 
 ## Offline host/protocol recovery
 

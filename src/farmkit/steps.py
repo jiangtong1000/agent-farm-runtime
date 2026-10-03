@@ -1,4 +1,4 @@
-"""steps.toml: the project's declarative step table (SRC_REFACTOR_PROPOSAL §5, D12/D13).
+"""steps.toml: the project's declarative step table.
 
     [defaults]
     retry = { infra = 1 }

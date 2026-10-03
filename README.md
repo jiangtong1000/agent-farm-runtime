@@ -61,8 +61,8 @@ stateDiagram-v2
 `WAITING` names a condition such as `job:<id>`, `task:<id>`, `artifact:<path>`, or
 `ruling:<name>`. `SUBMITTED` means ready for acceptance; `task-accept` records the
 decision and moves it to `DONE`. Nonterminal tasks can also be blocked or fail;
-`DONE` and `FAILED` are terminal. See the [lifecycle contract](V2_DESIGN.md) for the
-full state machine.
+`DONE` and `FAILED` are terminal. See the
+[lifecycle contract](docs/ARCHITECTURE.md#task-lifecycle) for the full state machine.
 
 ## Packages and boundaries
 
@@ -321,12 +321,12 @@ workspace copy may still be the previous verified result.
 
 Package version: **0.4.0**. Runtime protocol: **4**.
 
-- The local regression run at `e6c1ebd` reported **406 passed, 2 skipped**. The suite
-  includes unit tests, fault replays and integration tests with a fake scheduler.
-- [LESSONS.md](docs/LESSONS.md) records real-Slurm scratch canaries using a
-  **local-process worker**, including wait/resume, submission, acceptance, drain
-  and release restart. Those runs do not establish equivalent coverage for every
-  real Codex or Claude session path.
+- The suite includes unit tests, fault replays, fake-scheduler integration tests
+  and opt-in isolated tmux and native SSH canaries. See the
+  [test workflow](.github/workflows/tests.yml) for the current validation matrix.
+- Real Slurm jobs, site authentication and node turnover require deployment
+  validation. Synthetic workers and transport fixtures do not establish coverage
+  for every real Codex or Claude session path.
 - The interactive Textual UI has not yet been validated in a real terminal.
 - Control access has isolated unit/fault coverage. Site evidence can be gathered
   through [staged validation on the actual farm](docs/ACCESS_PROTOCOL.md#deployment-and-staged-validation)
@@ -353,11 +353,11 @@ calls. See [contributing](CONTRIBUTING.md) for implementation rules and
 - [Operations](docs/OPERATIONS.md): current commands and procedures for the Master.
 - [Control access](docs/ACCESS_PROTOCOL.md): schema, CLI, bootstrap, turnover and client contract.
 - [Master entrypoint](templates/RUNTIME_MASTER.md): the natural-language delegation workflow.
-- [Design contract](V2_DESIGN.md): retained invariants and the historical runtime baseline.
+- [Architecture](docs/ARCHITECTURE.md): current lifecycle, authority and persistence contracts.
 - [Lessons](docs/LESSONS.md): failure mechanisms and the regression tests that preserve their fixes.
 
-The design and lessons files are maintainer references; the Owner does not need to
-read them to use a farm.
+The architecture and lessons files are maintainer references; the Owner does not
+need to read them to use a farm.
 
 ## License
 

@@ -1,11 +1,15 @@
 # Contributing
 
-The frozen sections of [V2_DESIGN.md](V2_DESIGN.md) are architectural contracts.
-Its implementation status is historical; use [operations](docs/OPERATIONS.md) for
-current workflows. Do not change an invariant to accommodate an implementation shortcut.
+The [architecture reference](docs/ARCHITECTURE.md) defines the runtime's invariants;
+use [operations](docs/OPERATIONS.md) for current workflows. Do not change an
+invariant to accommodate an implementation shortcut.
 Keep reusable failure explanations in [lessons](docs/LESSONS.md); keep private
 project details and deployment records outside the repository. Tests should use
 synthetic task names, example hostnames and temporary directories.
+
+Keep maintained contracts and operating guides in the checkout. Completed design
+proposals, implementation plans and one-off review reports belong in Git history
+or issues; carry their lasting constraints into the current docs and tests.
 
 The optional release-wrapper comparison accepts `FARM_TEST_REFERENCE_WRAPPER` and,
 if needed, `FARM_TEST_REFERENCE_PYTHON`. Supply these explicitly for a local check;
